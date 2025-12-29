@@ -3,6 +3,7 @@ import json
 from typing import Dict, Callable, Awaitable, Any
 from redis import asyncio as aioredis
 import asyncio
+import time
 import logging
 
 logging.basicConfig(
@@ -15,15 +16,18 @@ logger = logging.getLogger(__name__)
 
 class RedisClient:
     """Shared Redis client for inter-process communication"""
-    def __init__(self, loop = None):
+    def __init__(self, loop = None, worker_id: str = "worker_1"):
         self.__host = os.getenv('REDIS_HOST', 'localhost')
         self.__port = int(os.getenv('REDIS_PORT', 6379))
         self.__username = os.getenv('REDIS_USERNAME', None)
         self.__password = os.getenv('REDIS_PASSWORD', None)
         self.__loop = loop or asyncio.get_event_loop()
+        self.worker_id = worker_id
         
         self.client: aioredis.Redis | None = None
         self.listeners: Dict[str, Callable[[Any], Awaitable[None]]] = {}
+
+        self.init = False
 
     async def connect(self):
         """Connect to Redis server and setup pub/sub listeners"""
@@ -45,6 +49,12 @@ class RedisClient:
             logger.error(f"[RedisClient] Failed to connect to Redis: {e}")
             raise
 
+        # send state
+        await self.client.set(f"state:{self.worker_id}", json.dumps({
+            "status": "running",
+            "timestamp": time.time()
+        }))
+
         # setup listeners
         if self.listeners:
             pubsub = self.client.pubsub()
@@ -53,37 +63,40 @@ class RedisClient:
                 logger.info(f"[RedisClient] Subscribed to channel '{channel}'")
 
             async def listener_loop():
-                async for message in pubsub.listen():
-                    if message['type'] == 'message':
-                        channel = message['channel']
-                        # data = json.loads(message['data'])
-                        data = message['data']
+                while True:
+                    try:
+                        async for message in pubsub.listen():
+                            if message['type'] == 'message':
+                                channel = message['channel']
+                                # data = json.loads(message['data'])
+                                data = message['data']
 
-                        try:
-                            data = json.loads(data)
-                        except json.JSONDecodeError:
-                            pass
+                                try:
+                                    data = json.loads(data)
+                                except json.JSONDecodeError:
+                                    pass
 
-                        callback = self.listeners.get(channel, None)
-                        if callback:
-                            await callback(data)
-                            logging.debug(f"[RedisClient] Message received on channel '{channel}': {data}")
+                                callback = self.listeners.get(channel, None)
+                                if callback:
+                                    logging.debug(f"[RedisClient] Message received on channel '{channel}': {data}")
+                                    try:
+                                        await callback(data)
+                                    except Exception as e:
+                                        logger.error(f"[RedisClient] Error in listener callback for channel '{channel}': {e}")
+                    except Exception as e:
+                        logger.error(f"[RedisClient] Error in listener loop: {e}")
+                        await asyncio.sleep(2)  # wait before retrying
 
             self.__loop.create_task(listener_loop())
-
-    async def send_heartbeat(self, heartbeat_data):
-        """
-        Send heartbeat to supervisor
-        
-        Args:
-            heartbeat_data: Dictionary containing worker status
-        """
-        await self.client.publish('worker:heartbeat', json.dumps(heartbeat_data))
-        logging.debug(f"[RedisClient] Heartbeat sent: {heartbeat_data}")
     
     async def close(self):
         """Close Redis connection"""
         if self.client:
+            await self.client.set(f"state:{self.worker_id}", json.dumps({
+                "status": "stopped",
+                "timestamp": time.time()
+            }))
+
             await self.client.aclose()
             logger.info("[RedisClient] Connection closed")
 
@@ -138,7 +151,7 @@ class RedisClient:
         await self.client.publish(channel, json.dumps(message))
         logger.debug(f"[RedisClient] Published message to channel '{channel}': {message}")
 
-    async def heartbeat(self, worker_id: str, status: str):
+    async def heartbeat(self):
         """
         Send a heartbeat message for a specific worker
 
@@ -147,11 +160,14 @@ class RedisClient:
             status: Current status of the worker
         """
         heartbeat_data = {
-            'worker_id': worker_id,
-            'status': status,
-            'timestamp': asyncio.get_event_loop().time()
+            'worker_id': self.worker_id,
+            'timestamp': time.time()
         }
-        await self.send_heartbeat(heartbeat_data)
+        
+        try:
+            await self.client.set(f'heartbeat:{self.worker_id}', json.dumps(heartbeat_data), ex = 3)
+        except Exception as e:
+            logger.error(f"[RedisClient] Failed to send heartbeat: {e}")
 
 # for testing purposes
 if __name__ == "__main__":
@@ -177,11 +193,23 @@ if __name__ == "__main__":
         await db.publish('test_channel', {'foo': 'bar', 'number': 42})
         # await db.close()
 
+    async def heartbeat_loop():
+        while True:
+            await db.heartbeat()
+            
+            if not db.init:
+                db.init = True
+
+            await asyncio.sleep(1)
+
     loop.create_task(test_redis_client())
     try:
-        loop.run_forever()
+        loop.run_until_complete(heartbeat_loop())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}")
+        loop.run_until_complete(db.close())
     finally:
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
