@@ -17,6 +17,8 @@ retry_count = 0
 max_retries = 5
 
 def runner():
+    global retry_count
+    
     master = mavutil.mavlink_connection(
         MAVLINK_UDP,
         source_system=1,
