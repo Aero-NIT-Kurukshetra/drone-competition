@@ -1,0 +1,4 @@
+shapely
+pyproj
+simplekml
+redis
