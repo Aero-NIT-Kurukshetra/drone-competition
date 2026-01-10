@@ -1,7 +1,8 @@
 import asyncio
+import json
 import logging
+import math
 import os
-import signal
 import time
 from typing import Dict, Any
 from dotenv import load_dotenv
@@ -17,7 +18,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("MissionManager")
 
 WORKER_ID = "mission_manager"
 
@@ -29,129 +30,244 @@ redis = RedisClient(loop=loop, worker_id=WORKER_ID)
 
 mission_state: Dict[str, Any] = {
     "system_mode": "NORMAL",
-    "active_drones": {},
-    "pending_plans": {},
+    "drone_pose": {
+        "scout": None,
+        "sprayer": None,
+    },
+    "active_waypoint": {
+        "scout": None,
+        "sprayer": None,
+    },
+    "halted": {
+        "scout": False,
+        "sprayer": False,
+    }
 }
+
+mav: MAVLinkManager | None = None
+
+@redis.listen("start_mission")
+async def handle_start_mission(_):
+    logger.info("[MissionManager] Starting mission")
+
+    for drone_id in ["scout", "sprayer"]:
+        mission_state["halted"][drone_id] = False
+
+    mav.set_guided_mode()
+    await asyncio.sleep(2)
+
+    mav.arm_and_takeoff("scout", 5) # altitude 5m
+
+    await redis.publish(
+        "path_planning:planning_request",
+        {"drone_id": "scout"}
+    )
+
+@redis.listen("path_planning:arm_takeoff")
+async def handle_arm_takeoff(data):
+    drone_id = data["drone_id"]
+    altitude = data.get("altitude", 5)
+
+    logger.info(f"[MissionManager] Arming and takeoff for {drone_id} to {altitude}m")
+
+    mav.arm_and_takeoff(drone_id, altitude)
 
 @redis.listen("event:planned_waypoint")
 async def handle_planned_waypoint(data):
-    """
-    Waypoint computed by Path Planner.
-    """
-    drone_id = data.get("drone_id")
-    waypoint = data.get("waypoint")
+    drone_id = data["drone_id"]
+    waypoint = data["waypoint"]
 
-    logger.info(f"[MissionManager] Waypoint received for {drone_id}: {waypoint}")
+    if mission_state["system_mode"] == "RECOVERY":
+        logger.warning(f"[MissionManager] Ignoring waypoint for {drone_id} (RECOVERY)")
+        return
 
-    # TODO: validate drone state
-    # TODO: issue MAVLink command to drone
-    await send_waypoint_to_drone(drone_id, waypoint)
+    logger.info(f"[MissionManager] Executing waypoint for {drone_id}: {waypoint}")
+
+    # mav.send_waypoint(
+    #     drone_id,
+    #     waypoint["x"],
+    #     waypoint["y"],
+    #     waypoint["z"]
+    # )
+
+    mav.send_waypoint_latlon(
+        drone_id,
+        waypoint["lat"],
+        waypoint["lon"],
+        waypoint.get("alt_m", 5.0)
+    )
+
+    mission_state["active_waypoint"][drone_id] = waypoint
+    mission_state["halted"][drone_id] = False
 
 @redis.listen("event:no_safe_path")
 async def handle_no_safe_path(data):
-    """
-    Planner reports no valid path.
-    """
-    drone_id = data.get("drone_id")
+    drone_id = data["drone_id"]
 
-    logger.warning(f"[MissionManager] No safe path for {drone_id}")
+    logger.warning(f"[MissionManager] NO SAFE PATH for {drone_id} → halting")
 
-    # TODO: hover / wait / abort logic
+    mav.halt(drone_id)
+    mission_state["halted"][drone_id] = True
 
 @redis.listen("event:occupancy_grid_updated")
-async def handle_grid_update(data):
-    """
-    Notification that grid has changed.
-    """
-    logger.debug("[MissionManager] Occupancy grid updated")
-    # TODO: decide whether to request replan
+async def handle_grid_update(_):
+    # Any grid update invalidates current assumptions
+    for drone_id in ["scout", "sprayer"]:
+        if not mission_state["halted"][drone_id]:
+            await redis.publish(
+                "path_planning:planning_request",
+                {"drone_id": drone_id}
+            )
 
 @redis.listen("event:crop_detected")
 async def handle_crop_detected(data):
-    """
-    Crop detection event from Camera Worker.
-    """
-    logger.info(f"[MissionManager] Crop detected: {data}")
+    logger.info(f"[MissionManager] Crop detected → dispatch sprayer")
 
-    # TODO: clustering logic
-    # TODO: request path planner to plan sprayer path
+    await redis.publish(
+        "path_planning:planning_request",
+        {
+            "drone_id": "sprayer",
+            "target": data["location"]
+        }
+    )
 
-@redis.listen("event:system_mode")
+@redis.listen("mission_manager:drone_pose_update")
+async def handle_pose_update(data):
+    drone_id = data["drone_id"]
+    mission_state["drone_pose"][drone_id] = data
+
+    (
+        scout_waypoints,
+        scout_current_wp_index,
+        sprayer_waypoints,
+        sprayer_current_wp_index,
+    ) = await redis.client.mget(
+        "path_planner:scout_waypoints",
+        "path_planner:current_scout_waypoint_index",
+        "path_planner:sprayer_waypoints",
+        "path_planner:current_sprayer_waypoint_index",
+    )
+
+    if drone_id == "scout" and not scout_waypoints:
+        return
+    
+    if drone_id == "sprayer" and not sprayer_waypoints:
+        return
+    
+    waypoints_data = json.loads(scout_waypoints)
+    scout_waypoints = waypoints_data["waypoints"]
+    scout_current_wp_index = int(scout_current_wp_index)
+
+    wp = None
+    if scout_current_wp_index < len(scout_waypoints):
+        wp = scout_waypoints[scout_current_wp_index]
+
+    if not wp:
+        return
+
+    try:
+        cur_lat = data["lat"]
+        cur_lon = data["lon"]
+    except KeyError:
+        print("what the fuck")
+        print(data)
+
+    distance = haversine_distance(cur_lat, cur_lon, wp["lat"], wp["lon"])
+
+    logger.info(f"[MissionManager] {drone_id} distance to waypoint: {distance:.2f}m")
+
+    if distance < 1.0:  # 1.0m radius
+        logger.info(f"[MissionManager] {drone_id} reached waypoint")
+
+        mission_state["active_waypoint"][drone_id] = None
+
+        if drone_id == "scout":
+            await redis.publish(
+                "path_planning:planning_request",
+                {"drone_id": drone_id, "lat": cur_lat, "lon": cur_lon}
+            )
+        elif drone_id == "sprayer":
+            # TODO: handle spraying mechanism here
+            # TODO: drone goes down to lower altitude to spray, goes back up and requests for new waypoint
+            pass 
+
+@redis.listen("system_mode")
 async def handle_system_mode(data):
-    """
-    Supervisor updates system-wide mode.
-    """
-    mode = data.get("mode", "NORMAL")
+    mode = data
     mission_state["system_mode"] = mode
 
-    logger.warning(f"[MissionManager] System mode set to {mode}")
+    logger.warning(f"[MissionManager] SYSTEM MODE → {mode}")
 
-    # TODO: enforce recovery behavior
+    if mode == "RECOVERY":
+        for drone_id in ["scout", "sprayer"]:
+            mav.halt(drone_id)
+            mission_state["halted"][drone_id] = True
 
-async def send_waypoint_to_drone(drone_id: str, waypoint: Dict[str, Any]):
-    """
-    Placeholder for MAVLink waypoint command.
-    """
-    logger.info(f"[MissionManager] Sending waypoint to {drone_id}: {waypoint}")
+            # TODO: send both drones to launch point
 
+def haversine_distance(lat1, lon1, lat2, lon2):
+    # Earth radius in meters
+    R = 6371000  
 
-async def halt_drone(drone_id: str):
-    """
-    Placeholder for HALT / HOVER command.
-    """
-    logger.warning(f"[MissionManager] Halting drone {drone_id}")
-    # TODO: MAVLink SET_MODE / LOITER
+    # Convert degrees to radians
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+
+    # Haversine formula
+    a = math.sin(dphi / 2)**2 + \
+        math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
+
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return R * c
 
 async def heartbeat_loop():
     while not shutdown_event.is_set():
-        try:
-            await redis.heartbeat()
-        except Exception as e:
-            logger.error(f"[MissionManager] Heartbeat error: {e}")
+        await redis.heartbeat()
         await asyncio.sleep(1)
 
-async def main(loop):
+async def main():
+    global mav
+
     await redis.connect()
 
-    startup_mode = await redis.get_startup_mode()
-    logger.info(f"[MissionManager] Starting in {startup_mode} mode")
+    logger.info("[MissionManager] Redis connected")
 
-    mav_manager = MAVLinkManager(
+    mav = MAVLinkManager(
         redis,
-        scout_uri=os.environ.get("SCOUT_MAVLINK_UDP", "udp:localhost:13550"),
-        sprayer_uri=os.environ.get("SPRAYER_MAVLINK_UDP", "udp:localhost:13560")
+        scout_uri=os.getenv("SCOUT_MAVLINK_UDP", "udp:localhost:13550"),
+        sprayer_uri=os.getenv("SPRAYER_MAVLINK_UDP", "udp:localhost:13560"),
+        loop=loop
     )
 
     tasks = [
         loop.create_task(heartbeat_loop()),
-        loop.create_task(mav_manager.listen()),
+        # loop.create_task(mav.listen()),
+        loop.create_task(mav.poll(mav.scout, "scout")),
+        loop.create_task(mav.poll(mav.sprayer, "sprayer")),
     ]
 
     await shutdown_event.wait()
 
-    logger.info("[MissionManager] Shutting down...")
     for task in tasks:
         task.cancel()
 
     await redis.close()
 
-def handle_shutdown():
-    logger.info("[MissionManager] Shutdown signal received")
+def shutdown():
+    logger.warning("[MissionManager] Shutdown initiated")
     shutdown_event.set()
 
-def runner():
-    # Signal handlers intentionally commented for Windows compatibility
-    # for sig in (signal.SIGINT, signal.SIGTERM):
-    #     loop.add_signal_handler(sig, handle_shutdown)
 
+def runner():
     try:
-        loop.run_until_complete(main(loop))
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        logger.error(f"[MissionManager] Fatal error: {e}")
     finally:
-        handle_shutdown()
+        shutdown()
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 
