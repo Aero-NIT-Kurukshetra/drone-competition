@@ -9,16 +9,20 @@ from workers.camera_processing.main import runner as cp_runner
 # tests
 from test_scripts.lidar_test.streamer import runner as lidar_streamer   # streams lidar data over mavlink
 from test_scripts.lidar_test.receiver import runner as lidar_receiver   # plots data received from mavlink
+from test_scripts.path_planning_test.mock_start_mission import runner as kml_streamer  # streams kml data to path planner
 
 
 links = {
 	# workers
 	"mission_manager": mm_runner,
 	"lidar_processing": lp_runner,
+	"path_planner": pp_runner,
+	"camera_processing": cp_runner,
 
 	# tests
 	"lidar_streamer": lidar_streamer,
 	"lidar_receiver": lidar_receiver,
+	"kml_streamer": kml_streamer
 }
 
 if __name__ == "__main__":
