@@ -17,7 +17,7 @@ links = {
 	"mission_manager": mm_runner,
 	"lidar_processing": lp_runner,
 	"path_planner": pp_runner,
-	"camera_processing": cp_runner,
+	# "camera_processing": cp_runner,
 
 	# tests
 	"lidar_streamer": lidar_streamer,
