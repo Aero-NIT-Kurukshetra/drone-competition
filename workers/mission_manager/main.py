@@ -60,13 +60,21 @@ mav: MAVLinkManager | None = None
 async def handle_start_mission(_):
     logger.info("[MissionManager] Starting mission")
 
-    for drone_id in ["scout", "sprayer"]:
-        mission_state["halted"][drone_id] = False
+    mission_state["system_mode"] = "NORMAL"
+    mission_state["drones"] = {
+        "scout": default_drone_state(),
+        "sprayer": default_drone_state(),
+    }
+    await sync_state_to_redis()
+
+    for drone_id in DRONES:
+        resume_drone(drone_id)
 
     mav.set_guided_mode()
     await asyncio.sleep(2)
 
-    mav.arm_and_takeoff("scout", 5) # altitude 5m
+    mav.arm_and_takeoff("scout", 5)
+    set_mode("scout", "TAKING_OFF")
 
     await redis.publish(
         "mission_manager:request_next_waypoint",
@@ -87,9 +95,30 @@ async def handle_planned_waypoint(data):
     drone_id = data["drone_id"]
     waypoint = data["waypoint"]
 
+    drone = mission_state["drones"][drone_id]
+
     if mission_state["system_mode"] == "RECOVERY":
         logger.warning(f"[MissionManager] Ignoring waypoint for {drone_id} (RECOVERY)")
         return
+
+    if drone["halted"]:
+        logger.warning(f"[MissionManager] Ignoring waypoint for {drone_id} (HALTED)")
+        return
+    
+    if waypoint is None:
+        logger.info(f"[MissionManager] No more waypoints for {drone_id} → hovering")
+        mav.halt(drone_id)
+        if drone_id == "scout":
+            # change mode to LANDING
+            set_mode(drone_id, "LANDING")
+            mav.land_and_disarm(drone_id)
+            # land 
+            pass
+        else:
+            set_mode(drone_id, "HOVERING")
+
+        return
+        
 
     logger.info(f"[MissionManager] Executing waypoint for {drone_id}: {waypoint}")
 
@@ -108,8 +137,7 @@ async def handle_planned_waypoint(data):
         waypoint.get("alt_m", 5.0)
     )
 
-    mission_state["active_waypoint"][drone_id] = waypoint
-    mission_state["halted"][drone_id] = False
+    set_active_waypoint(drone_id, waypoint)
 
 @redis.listen("event:no_safe_path")
 async def handle_no_safe_path(data):
@@ -264,7 +292,12 @@ async def complete_spraying_cycle():
 @redis.listen("mission_manager:drone_pose_update")
 async def handle_pose_update(data):
     drone_id = data["drone_id"]
-    mission_state["drone_pose"][drone_id] = data
+    drone = mission_state["drones"][drone_id]
+
+    drone["last_pose_ts"] = data["timestamp"]
+
+    if drone["halted"] or drone["mode"] not in ["NAVIGATING_TO_WAYPOINT", "WAITING_FOR_NEXT_WAYPOINT", "TAKING_OFF"]:
+        return
 
     (
         scout_waypoints,
@@ -278,42 +311,37 @@ async def handle_pose_update(data):
         "path_planner:current_sprayer_waypoint_index",
     )
 
-    if drone_id == "scout" and not scout_waypoints:
-        return
-    
-    if drone_id == "sprayer" and not sprayer_waypoints:
-        return
-    
-    waypoints_data = json.loads(scout_waypoints)
-    scout_waypoints = waypoints_data["waypoints"]
-    scout_current_wp_index = int(scout_current_wp_index)
+    if drone_id == "scout" and scout_waypoints:
+        waypoints_data = json.loads(scout_waypoints)
+        scout_waypoints = waypoints_data["waypoints"]
+        scout_current_wp_index = int(scout_current_wp_index)
 
-    wp = None
-    if scout_current_wp_index < len(scout_waypoints):
-        wp = scout_waypoints[scout_current_wp_index]
+        wp = None
+        if scout_current_wp_index < len(scout_waypoints):
+            wp = scout_waypoints[scout_current_wp_index]
 
-    if not wp:
-        return
+        if not wp:
+            return
 
-    try:
-        cur_lat = data["lat"]
-        cur_lon = data["lon"]
-    except KeyError:
-        print(data)
+        try:
+            cur_lat = data["lat"]
+            cur_lon = data["lon"]
+        except KeyError:
+            print(data)
 
-    distance = haversine_distance(cur_lat, cur_lon, wp["lat"], wp["lon"])
+        distance = haversine_distance(cur_lat, cur_lon, wp["lat"], wp["lon"])
 
-    logger.info(f"[MissionManager] {drone_id} distance to waypoint: {distance:.2f}m")
+        logger.info(f"[MissionManager] {drone_id} distance to waypoint: {distance:.2f}m")
 
-    if drone_id == "scout" and distance < 1.0:  # 1.0m radius
-        logger.info(f"[MissionManager] {drone_id} reached waypoint")
+        if distance < 1.0:  # 1.0m radius
+            logger.info(f"[MissionManager] {drone_id} reached waypoint")
 
-        mission_state["active_waypoint"][drone_id] = None
+            clear_active_waypoint(drone_id)
 
-        await redis.publish(
-            "mission_manager:request_next_waypoint",
-            {"drone_id": drone_id, "lat": cur_lat, "lon": cur_lon}
-        )
+            await redis.publish(
+                "mission_manager:request_next_waypoint",
+                {"drone_id": drone_id, "lat": cur_lat, "lon": cur_lon}
+            )
 
     elif drone_id == "sprayer":
         target = mission_state["current_target"]["sprayer"]
@@ -342,16 +370,13 @@ async def handle_pose_update(data):
             asyncio.create_task(complete_spraying_cycle()) 
 
 @redis.listen("system_mode")
-async def handle_system_mode(data):
-    mode = data
+async def handle_system_mode(mode):
     mission_state["system_mode"] = mode
-
     logger.warning(f"[MissionManager] SYSTEM MODE → {mode}")
 
     if mode == "RECOVERY":
-        for drone_id in ["scout", "sprayer"]:
-            mav.halt(drone_id)
-            mission_state["halted"][drone_id] = True
+        for drone_id in DRONES:
+            halt_drone(drone_id)
 
             # TODO: send both drones to launch point
 
