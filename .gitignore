@@ -4,5 +4,8 @@ __pycache__/
 *.pyc
 .vscode/
 .env
+*.kml
+*.csv
+venv/
 logs
 *.bin

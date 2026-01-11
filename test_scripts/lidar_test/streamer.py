@@ -3,7 +3,7 @@ import numpy as np
 from rplidar import RPLidar
 from pymavlink import mavutil
 
-LIDAR_PORT = "COM5"          # change this
+LIDAR_PORT = "COM17"          # change this
 LIDAR_BAUD = 1000000          # RPLidar S2/S2L
 ANGLE_RES_DEG = 5
 NUM_BINS = int(360 / ANGLE_RES_DEG)
@@ -13,7 +13,12 @@ MAX_DIST_CM = 1500   # rplidar max limit is 18m, but we cap lower
 
 MAVLINK_UDP = "udp:127.0.0.1:13551"
 
+retry_count = 0
+max_retries = 5
+
 def runner():
+    global retry_count
+    
     master = mavutil.mavlink_connection(
         MAVLINK_UDP,
         source_system=1,
@@ -55,11 +60,22 @@ def runner():
                 frame=mavutil.mavlink.MAV_FRAME_BODY_FRD
             )
 
+            if retry_count > 0:
+                retry_count = 0
+
             # ~8–10 Hz is ideal
             time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("Stopping...")
+
+    except:
+        retry_count += 1
+        print(f"Error occurred. Retry {retry_count}/{max_retries}")
+        if retry_count >= max_retries:
+            print("Max retries reached. Exiting.")
+        else:
+            runner()
 
     finally:
         lidar.stop()
