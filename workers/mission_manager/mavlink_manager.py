@@ -210,6 +210,43 @@ class MAVLinkManager:
             0, 0, 0, 0, 0, 0, 0, altitude
         )
 
+    def land_and_disarm(self, drone_id, force=False):
+        link = self.scout if drone_id == "scout" else self.sprayer
+
+        if force:
+            # force disarm
+            link.mav.command_long_send(
+                link.target_system,
+                link.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,
+                21196, 0, 0, 0, 0, 0, 0
+            )
+            return
+        
+        # Land
+        link.mav.command_long_send(
+            link.target_system, link.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_LAND,
+            0, 0, 0, 0, 0, 0, 0, 0
+        )
+
+        while True:
+            msg = link.recv_match(type="LANDING_TARGET", blocking=True, timeout=5)
+            if msg:
+                break
+
+        logger.info(f"[MAVLink] {drone_id} landing initiated")
+        time.sleep(3)
+
+        link.mav.command_long_send(
+            link.target_system,
+            link.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0, 0, 0, 0, 0, 0, 0
+        )
+
     def send_waypoint(self, drone_id, x, y, z):
         link = self.scout if drone_id == "scout" else self.sprayer
 
@@ -262,12 +299,11 @@ class MAVLinkManager:
             link.target_system,
             link.target_component,
             mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM,
-            0, 0, 0, 0, 0, 0, 0
+            0, 0, 0, 0, 0, 0, 0, 0
         )
 
 # testing
 def test():
-    
     import os
     from dotenv import load_dotenv
 

@@ -115,7 +115,7 @@ def generate_waypoints(lines, transformer, angle_deg):
 
     return waypoints
 
-@redis.listen("event:pathplanner_in")
+@redis.listen("mission_manager:scout_planning_request")
 async def handle_pathplanner_event(data: dict):
     """
     Expected payload:
@@ -187,8 +187,8 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
     return R * c
 
-@redis.listen("path_planning:planning_request")
-async def handle_planning_request(data):
+@redis.listen("mission_manager:request_next_waypoint")
+async def handle_request_next_waypoint(data):
     drone_id = data["drone_id"]
     lat = data.get("lat", None)
     lon = data.get("lon", None)
@@ -207,7 +207,10 @@ async def handle_planning_request(data):
 
     if current_waypoint >= len(current_scout_waypoints) - 1:
         logger.info(f"[{WORKER_ID}] All waypoints completed for {drone_id}")
-        return
+        await redis.publish(
+            "path_planning:planned_waypoint",
+            {"drone_id": drone_id, "waypoint": None}
+        )
     else:
         curr_wp = current_scout_waypoints[current_waypoint]
         next_wp = current_scout_waypoints[current_waypoint+1]
@@ -222,13 +225,13 @@ async def handle_planning_request(data):
             if dist > MARGIN_DISTANCE_M:
                 logger.warning(f"[{WORKER_ID}] Drone is {dist:.2f}m away from expected position for waypoint {current_waypoint}. Sending current waypoint.")
                 await redis.publish(
-                    "event:planned_waypoint",
+                    "path_planning:planned_waypoint",
                     {"drone_id": drone_id, "waypoint": curr_wp}
                 )
                 return
 
         await redis.publish(
-            "event:planned_waypoint",
+            "path_planning:planned_waypoint",
             {"drone_id": drone_id, "waypoint": next_wp}
         )
 

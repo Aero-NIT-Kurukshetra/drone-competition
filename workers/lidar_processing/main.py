@@ -180,11 +180,8 @@ def update_grid(x_d: float, y_d: float, yaw_deg: float,
 async def publish_grid():
     """Publish occupancy grid to Redis and emit update event"""
     await redis.client.set("occupancy_grid", occupancy_grid.tobytes())
-    await redis.publish("event:occupancy_grid_updated", {"status": "updated", "timestamp": time.time()})
+    await redis.publish("lidar_processing:occupancy_grid_updated", {"status": "updated", "timestamp": time.time()})
     logger.info(f"[{WORKER_ID}] Occupancy grid published")
-
-
-# ---------------- Redis Event Listeners ---------------- #
 
 @redis.listen("mission_manager:drone_pose_update")
 async def handle_drone_pose_update(data):
@@ -224,9 +221,6 @@ async def handle_system_time(data):
     """Update time sync"""
     global time_boot_us
     time_boot_us = data.get("time_boot_us", 0)
-
-
-# ---------------- Worker Loops ---------------- #
 
 async def heartbeat_loop():
     while not shutdown_event.is_set():
