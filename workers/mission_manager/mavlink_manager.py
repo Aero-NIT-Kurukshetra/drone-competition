@@ -33,6 +33,17 @@ class MAVLinkManager:
                 10,  # 1 Hz
                 1   # start
             )
+
+            # limit speed
+            for param in [b'WPNAV_SPEED', b'WPNAV_SPEED_DN', b'WPNAV_SPEED_UP']:
+                drone.mav.param_set_send(
+                    drone.target_system,
+                    drone.target_component,
+                    param,
+                    75,  # cm/s
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+                )
+
         logger.info(f"[MAVLink] Requested data stream from drones")
 
     # async def listen(self):
