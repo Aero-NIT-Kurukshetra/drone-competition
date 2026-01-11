@@ -4,7 +4,7 @@ import sys
 from workers.mission_manager.main import runner as mm_runner
 from workers.lidar_processing.main import runner as lp_runner
 from workers.path_planning.main import runner as pp_runner
-from workers.camera_processing.main import runner as cp_runner
+# from workers.camera_processing.main import runner as cp_runner
 
 # tests
 from test_scripts.lidar_test.streamer import runner as lidar_streamer   # streams lidar data over mavlink

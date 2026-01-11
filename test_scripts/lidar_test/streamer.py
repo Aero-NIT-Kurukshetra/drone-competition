@@ -3,7 +3,7 @@ import numpy as np
 from rplidar import RPLidar
 from pymavlink import mavutil
 
-LIDAR_PORT = "COM5"          # change this
+LIDAR_PORT = "COM17"          # change this
 LIDAR_BAUD = 1000000          # RPLidar S2/S2L
 ANGLE_RES_DEG = 5
 NUM_BINS = int(360 / ANGLE_RES_DEG)
