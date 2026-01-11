@@ -207,7 +207,10 @@ async def handle_request_next_waypoint(data):
 
     if current_waypoint >= len(current_scout_waypoints) - 1:
         logger.info(f"[{WORKER_ID}] All waypoints completed for {drone_id}")
-        return
+        await redis.publish(
+            "path_planning:planned_waypoint",
+            {"drone_id": drone_id, "waypoint": None}
+        )
     else:
         curr_wp = current_scout_waypoints[current_waypoint]
         next_wp = current_scout_waypoints[current_waypoint+1]
