@@ -10,6 +10,7 @@ from workers.path_planning.main import runner as pp_runner
 from test_scripts.lidar_test.streamer import runner as lidar_streamer   # streams lidar data over mavlink
 from test_scripts.lidar_test.receiver import runner as lidar_receiver   # plots data received from mavlink
 from test_scripts.path_planning_test.mock_start_mission import runner as kml_streamer  # streams kml data to path planner
+from test_scripts.mission_manager.state_listener import runner as mm_state_listener  # listens to mission manager state updates
 
 
 links = {
@@ -22,7 +23,8 @@ links = {
 	# tests
 	"lidar_streamer": lidar_streamer,
 	"lidar_receiver": lidar_receiver,
-	"kml_streamer": kml_streamer
+	"kml_streamer": kml_streamer,
+	"mm_state_listener": mm_state_listener
 }
 
 if __name__ == "__main__":
