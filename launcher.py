@@ -2,23 +2,26 @@ import sys
 
 # workers
 from workers.mission_manager.main import runner as mm_runner
-from workers.lidar_processing.main import runner as lp_runner
+# from workers.lidar_processing.main import runner as lp_runner
 from workers.path_planning.main import runner as pp_runner
 from workers.camera_processing.main import runner as cp_runner
 
 # tests
 from test_scripts.lidar_test.streamer import runner as lidar_streamer   # streams lidar data over mavlink
 from test_scripts.lidar_test.receiver import runner as lidar_receiver   # plots data received from mavlink
+from test_scripts.camera_test.mock_camera import runner as mock_camera 
 
 
 links = {
 	# workers
 	"mission_manager": mm_runner,
-	"lidar_processing": lp_runner,
+	# "lidar_processing": lp_runner,
+	"camera_processing" : cp_runner,
 
 	# tests
 	"lidar_streamer": lidar_streamer,
 	"lidar_receiver": lidar_receiver,
+	"mock_camera": mock_camera,
 }
 
 if __name__ == "__main__":
