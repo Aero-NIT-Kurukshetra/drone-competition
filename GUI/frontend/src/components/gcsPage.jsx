@@ -116,7 +116,7 @@ const DroneGCSDashboard = () => {
                     <div className="text-xs text-gray-600 mb-1">Battery</div>
                     <div className="flex items-center gap-1">
                       <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                      <span className="text-sm font-semibold">{droneData?.scout?.remaining_pct || "N/A"}%</span>
+                      <span className="text-sm font-semibold">{droneData?.scout?.remaining_pct||"0"}%</span>
                     </div>
                   </div>
                 </div>
@@ -136,7 +136,7 @@ const DroneGCSDashboard = () => {
                     <div className="text-xs text-gray-600 mb-1">Battery</div>
                     <div className="flex items-center gap-1">
                       <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                      <span className="text-sm font-semibold">{droneData.sprayer?.remaining_pct || "N/A"}%</span>
+                      <span className="text-sm font-semibold">{droneData.sprayer?.remaining_pct || "0"}%</span>
                     </div>
                   </div>
                 </div>
@@ -239,7 +239,7 @@ const DroneGCSDashboard = () => {
             </div>
 
             {/* Map Content */}
-            <div className="w-full h-full bg-gradient-to-br from-blue-50 to-gray-100 relative">
+            <div className="w-full h-full bg-gradient-to-br top-32 from-blue-50 to-gray-100 relative">
               {/* Flight Zone */}
               <DroneMap drones={droneGPS}/>
               </div>

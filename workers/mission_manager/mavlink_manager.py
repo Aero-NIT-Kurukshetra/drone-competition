@@ -110,6 +110,10 @@ class MAVLinkManager:
             )
         elif t == "SYS_STATUS":   
             self.loop.create_task(self._handle_battery(msg, drone_id))
+        elif t == "GPS_RAW_INT":
+            self.loop.create_task(
+            self._handle_gps_status(msg, drone_id)
+         )
 
         elif t in ["SPRAYER_COMMAND", "SPRAYER_FINISHED", "CROP_DETECTED"]:
             print(f"[MAVLink] Received {t} from {drone_id}: {msg.to_dict()}")
@@ -278,7 +282,32 @@ class MAVLinkManager:
             payload
         )
 
+    def _handle_gps_status(self, msg, drone_id):
+        """
+        GPS_RAW_INT fields:
+        fix_type:
+            0: no fix
+            1: no fix
+            2: 2D fix
+            3: 3D fix
+            4: DGPS fix
+            5: RTK fix
+        satellites_visible: number of satellites visible
+        """
 
+        payload = {
+            "drone_id": drone_id,
+            "fix_type": msg.fix_type,
+            "satellites_visible": msg.satellites_visible,
+            "timestamp": time.time()
+        }
+
+        self.loop.create_task(
+            self.redis.publish(
+                "mission_manager:drone_gps_status",
+                payload
+            )
+        )
     def arm_and_takeoff(self, drone_id, altitude):
         link = self.scout if drone_id == "scout" else self.sprayer
 

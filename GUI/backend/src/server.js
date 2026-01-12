@@ -87,6 +87,7 @@ app.get("/api/drones/gps", async (req, res) => {
 
 app.get("/api/drone_data", async (req, res) => {
   try {
+    console.log(drone_data);
     res.json(drone_data);
   } catch (err) {
     console.error(err);
