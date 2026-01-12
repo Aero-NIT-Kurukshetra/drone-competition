@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 class RedisClient:
     """Shared Redis client for inter-process communication"""
     def __init__(self, loop = None, worker_id: str = "worker_1"):
-        self.__host = os.getenv('REDIS_HOST', 'localhost')
-        self.__port = int(os.getenv('REDIS_PORT', 6379))
+        self.__host = os.getenv('REDIS_HOST', None)
+        self.__port = int(os.getenv('REDIS_PORT', None))
         self.__username = os.getenv('REDIS_USERNAME', None)
         self.__password = os.getenv('REDIS_PASSWORD', None)
         self.__loop = loop or asyncio.get_event_loop()

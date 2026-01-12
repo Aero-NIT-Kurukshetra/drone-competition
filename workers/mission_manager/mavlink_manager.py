@@ -103,7 +103,10 @@ class MAVLinkManager:
             self.loop.create_task(
                 self._handle_extended_sys_state(msg, drone_id)
             )
-
+        elif t == "STATUSTEXT":
+            self.loop.create_task(
+            self._handle_statustext(msg, drone_id)
+        )
         elif t == "OBSTACLE_DISTANCE":
             print("hi")
             self.loop.create_task(
@@ -172,7 +175,15 @@ class MAVLinkManager:
         }
 
         await self.redis.publish("mission_manager:drone_heartbeat", payload)
+    async def _handle_statustext(self, msg, drone_id):
+        payload = {
+            "drone_id": drone_id,
+            "severity": msg.severity,
+            "text": msg.text.decode('utf-8', errors='ignore').strip('\x00'),
+            "timestamp": time.time()
+        }
 
+        await self.redis.publish("mission_manager:drone_leaf_dectection", payload)
     async def _handle_crop_detected(self, msg, drone_id):
         payload = {
             "drone_id": drone_id,

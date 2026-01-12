@@ -3,3 +3,5 @@ pyproj
 simplekml
 redis
 pymavlink
+rplidar
+pymavlink

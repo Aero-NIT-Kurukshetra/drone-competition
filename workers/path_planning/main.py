@@ -586,7 +586,7 @@ async def _handle_scout_waypoint_request(lat, lon):
             "path_planning:planned_waypoint",
             {"drone_id": "scout", "waypoint": next_wp}
         )
-
+        await redis.client.publish("path_planner:total_scout_waypoints", str(len(current_scout_waypoints)))
         await redis.client.set("path_planner:current_scout_waypoint_index", str(current_waypoint + 1))
 
 
