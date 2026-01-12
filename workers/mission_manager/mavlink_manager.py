@@ -15,8 +15,16 @@ class MAVLinkManager:
         self.redis = redis
         self.loop = loop or asyncio.get_event_loop()
 
-        self.scout = mavutil.mavlink_connection(scout_uri)
-        self.sprayer = mavutil.mavlink_connection(sprayer_uri)
+        self.scout = mavutil.mavlink_connection(
+            scout_uri,
+            source_system=10,
+            source_component=1
+        )
+        self.sprayer = mavutil.mavlink_connection(
+            sprayer_uri,
+            source_system=11,
+            source_component=1
+        )
         
         self.scout.wait_heartbeat()
         logger.info("[MAVLink] Connected to scout")
@@ -106,12 +114,9 @@ class MAVLinkManager:
             print(f"[MAVLink] Received {t} from {drone_id}: {msg.to_dict()}")
 
         elif t == "ENCAPSULATED_DATA":
-            print("aaaaaaaaaaa")
             raw = bytes(msg.data)
-            data = struct.unpack("<BiiB", raw[:9])
+            data = struct.unpack("<BiiB", raw[:10])
 
-            print(data)
-            
             msg_type = data[0]
 
             if msg_type == 0:  # CROP_DETECTED_MESSAGE
@@ -246,6 +251,7 @@ class MAVLinkManager:
                 mode_id
             )
         logger.info(f"[MAVLink] Set drones to GUIDED mode")
+
     async def _handle_battery(self, msg, drone_id):
         """
         SYS_STATUS battery fields:
@@ -265,6 +271,7 @@ class MAVLinkManager:
             "remaining_pct": msg.battery_remaining,
             "timestamp": time.time()
         }
+
         await self.redis.publish(
             "mission_manager:drone_battery_update",
             payload
