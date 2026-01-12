@@ -1,4 +1,5 @@
 import asyncio
+import struct
 import time
 import logging
 from pymavlink import mavutil
@@ -93,10 +94,34 @@ class MAVLinkManager:
                 self._handle_extended_sys_state(msg, drone_id)
             )
 
-        elif t == "OBSTACLE_DISTANCE" and drone_id == "scout":
+        elif t == "OBSTACLE_DISTANCE":
+            print("hi")
             self.loop.create_task(
                 self._handle_obstacle_distance(msg)
             )
+        elif t == "SYS_STATUS":   
+            self.loop.create_task(self._handle_battery(msg, drone_id))
+
+        elif t in ["SPRAYER_COMMAND", "SPRAYER_FINISHED", "CROP_DETECTED"]:
+            print(f"[MAVLink] Received {t} from {drone_id}: {msg.to_dict()}")
+
+        elif t == "ENCAPSULATED_DATA":
+            print("aaaaaaaaaaa")
+            raw = bytes(msg.data)
+            data = struct.unpack("<BiiB", raw[:9])
+
+            print(data)
+            
+            msg_type = data[0]
+
+            if msg_type == 0:  # CROP_DETECTED_MESSAGE
+                self.loop.create_task(
+                    self._handle_crop_detected(data, drone_id)
+                )
+            elif msg_type == 2:  # SPRAYER_FINISHED_MESSAGE
+                self.loop.create_task(
+                    self._handle_sprayer_finished(data, drone_id)
+                )
 
     def _handle_system_time(self, msg):
         self._boot_time_offset = (
@@ -136,6 +161,27 @@ class MAVLinkManager:
         }
 
         await self.redis.publish("mission_manager:drone_heartbeat", payload)
+
+    async def _handle_crop_detected(self, msg, drone_id):
+        payload = {
+            "drone_id": drone_id,
+            "lat": msg[1] / 1e7,
+            "lon": msg[2] / 1e7,
+            "confidence": msg[3],
+            "timestamp": time.time()
+        }
+
+        await self.redis.publish("mission_manager:drone_crop_detected", payload)
+
+    async def _handle_sprayer_finished(self, msg, drone_id):
+        payload = {
+            "drone_id": drone_id,
+            "result": msg[1],
+            "spray_time_ms": msg[2],
+            "timestamp": time.time()
+        }
+
+        await self.redis.publish("mission_manager:drone_sprayer_finished", payload)
 
     async def _handle_extended_sys_state(self, msg, drone_id):
         """
@@ -200,6 +246,30 @@ class MAVLinkManager:
                 mode_id
             )
         logger.info(f"[MAVLink] Set drones to GUIDED mode")
+    async def _handle_battery(self, msg, drone_id):
+        """
+        SYS_STATUS battery fields:
+        voltage_battery: mV
+        current_battery: cA
+        battery_remaining: %
+        """
+
+        # Some FCs send -1 when data is unavailable
+        if msg.voltage_battery <= 0:
+            return
+
+        payload = {
+            "drone_id": drone_id,
+            "voltage_v": msg.voltage_battery / 1000.0,
+            "current_a": msg.current_battery / 100.0 if msg.current_battery != -1 else None,
+            "remaining_pct": msg.battery_remaining,
+            "timestamp": time.time()
+        }
+        await self.redis.publish(
+            "mission_manager:drone_battery_update",
+            payload
+        )
+
 
     def arm_and_takeoff(self, drone_id, altitude):
         link = self.scout if drone_id == "scout" else self.sprayer

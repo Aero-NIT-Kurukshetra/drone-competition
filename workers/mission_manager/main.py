@@ -6,6 +6,7 @@ import os
 import time
 from typing import Dict, Any
 from dotenv import load_dotenv
+from pymavlink import mavutil
 
 load_dotenv()
 
@@ -158,7 +159,7 @@ async def handle_planned_waypoint(data):
         return
     
     if waypoint is None:
-        logger.info(f"[MissionManager] No more waypoints for {drone_id} → hovering")
+        logger.info(f"[MissionManager] No more waypoints for {drone_id}")
         mav.halt(drone_id)
         if drone_id == "scout":
             # change mode to LANDING
@@ -170,7 +171,6 @@ async def handle_planned_waypoint(data):
             set_mode(drone_id, "HOVERING")
 
         return
-        
 
     logger.info(f"[MissionManager] Executing waypoint for {drone_id}: {waypoint}")
 
@@ -212,16 +212,6 @@ async def handle_grid_update(_):
 
 @redis.listen("event:crop_detected")
 async def handle_crop_detected(data):
-    logger.info(f"[MissionManager] Crop detected → dispatch sprayer")
-
-    await redis.publish(
-        "mission_manager:request_next_waypoint",
-        {
-            "drone_id": "sprayer",
-            "target": data["location"]
-        }
-    )
-
     logger.info("[MissionManager] Crop detected → dispatch sprayer")
 
     # Example: data coming from vision worker
@@ -231,56 +221,50 @@ async def handle_crop_detected(data):
     #   "alt": 3.0
     # }
 
-    # New crop point
-    new_crop = {
+    crop_location = {
         "lat": data["lat"],
         "lon": data["lon"],
-        "alt": data.get("alt", 5.0)
+        "alt": data.get("alt", 3.0),
     }
 
-    # Fetch existing crops
-    crop_locations_raw = await redis.client.get("crop_locations")
-
-    if crop_locations_raw:
-        crop_locations = json.loads(crop_locations_raw.decode())
+    # Fetch current crop_locations array
+    crop_locations_json = await redis.client.get("crop_locations")
+    
+    if crop_locations_json:
+        crop_locations = json.loads(crop_locations_json)
     else:
         crop_locations = []
-        await redis.client.set(
-            "path_planner:current_target_crop_index", "-1"
-        )
-
-    # Append safely
-    crop_locations.append(new_crop)
-
-    await redis.client.set(
-        "crop_locations",
-        json.dumps(crop_locations)
-    )
+        # Initialize index to -1 if first crop
+        await redis.client.set("path_planner:current_crop_target_index", "-1")
+    
+    # Append new crop location
+    crop_locations.append(crop_location)
+    await redis.client.set("crop_locations", json.dumps(crop_locations))
 
     logger.info(
         f"[MissionManager] Crop appended → "
-        f"lat={new_crop['lat']}, lon={new_crop['lon']} "
+        f"lat={crop_location['lat']}, lon={crop_location['lon']} "
         f"(total: {len(crop_locations)})"
     )
 
-    # If sprayer is idle, dispatch it to next crop
-    if mission_state["drones"]["sprayer"]["mode"] == "IDLE":
+    # If sprayer is idle, dispatch it immediately
+    if mission_state["mode"]["sprayer"] == "IDLE":
         await dispatch_sprayer_to_next_crop()
 
 
 async def dispatch_sprayer_to_next_crop():
     """Increment crop index and request path planning for sprayer to next crop."""
     # Fetch crop_locations array
-    crop_locations_raw = await redis.client.get("crop_locations")
+    crop_locations_json = await redis.client.get("crop_locations")
     
-    if not crop_locations_raw:
+    if not crop_locations_json:
         logger.info("[MissionManager] No crops detected yet, sprayer remains IDLE")
         return
     
-    crop_locations = json.loads(crop_locations_raw)
+    crop_locations = json.loads(crop_locations_json)
     
     # Get current index and increment
-    current_index = await redis.client.get("path_planner:current_target_crop_index")
+    current_index = await redis.client.get("path_planner:current_crop_target_index")
     current_index = int(current_index) if current_index else -1
     
     next_index = current_index + 1
@@ -289,35 +273,23 @@ async def dispatch_sprayer_to_next_crop():
     if next_index >= len(crop_locations):
         logger.info(f"[MissionManager] All crops sprayed ({len(crop_locations)} total), sprayer remains IDLE")
         return
-
-    # Request path planning for sprayer
+    
+    # Update index in Redis
+    await redis.client.set("path_planner:current_crop_target_index", str(next_index))
+    
+    crop = crop_locations[next_index]
+    logger.info(f"[MissionManager] Dispatching sprayer to crop {next_index + 1}/{len(crop_locations)} at lat={crop['lat']}, lon={crop['lon']}")
+    
+    mission_state["mode"]["sprayer"] = "NAVIGATING"
+    mission_state["current_target"]["sprayer"] = crop
+    
     await redis.publish(
-        "mission_manager:sprayer_plan_request",
+        "mission_manager:request_next_waypoint",
         {
             "drone_id": "sprayer",
-            "drone_pose": {
-                "lat": mission_state["drones"]["sprayer"]["current_loc"]["lat"],
-                "lon": mission_state["drones"]["sprayer"]["current_loc"]["lon"],
-                "alt": mission_state["drones"]["sprayer"]["current_loc"].get("alt", 5.0)
-            }
+            "target": data["location"]
         }
     )
-
-
-@redis.listen("sprayer:state_update")
-async def handle_sprayer_state(data):
-    """Listen for sprayer drone state changes. If IDLE, request next crop waypoint."""
-    state = data.get("state", "IDLE")
-    previous_state = mission_state["drones"]["sprayer"]["mode"]
-    
-    logger.info(f"[MissionManager] Sprayer state update: {previous_state} → {state}")
-    
-    set_mode("sprayer", state)
-    
-    # If sprayer just became IDLE, check for next crop to spray
-    if state == "IDLE" and previous_state != "IDLE":
-        await dispatch_sprayer_to_next_crop()
-
 
 @redis.listen("mission_manager:drone_pose_update")
 async def handle_pose_update(data):
@@ -373,14 +345,125 @@ async def handle_pose_update(data):
                 {"drone_id": drone_id, "lat": cur_lat, "lon": cur_lon}
             )
 
-    elif drone_id == "sprayer":
+    elif drone_id == "sprayer" and sprayer_waypoints:
         mission_state["drones"][drone_id]["current_loc"]["lat"] = data["lat"]
         mission_state["drones"][drone_id]["current_loc"]["lon"] = data["lon"]
 
-        # TODO: check if drone has reached the crop location, if not -> request waypoints from path planner
-        # TODO: once on crop, handle spraying mechanism here - define a custom mavlink message -> START_SPRAYING with no arguments -> it triggers the sprayer to start spraying and automatically stops after <preset> seconds
-        # TODO: drone goes down to lower altitude to spray, goes back up and requests for new waypoint
-        pass
+        waypoints_data = json.loads(sprayer_waypoints)
+        sprayer_waypoints = waypoints_data["waypoints"]
+        sprayer_current_wp_index = int(sprayer_current_wp_index)
+
+        if sprayer_current_wp_index >= len(sprayer_waypoints):
+            return
+
+        wp = sprayer_waypoints[sprayer_current_wp_index]
+
+        try:
+            cur_lat = data["lat"]
+            cur_lon = data["lon"]
+            cur_alt = data["alt_m"]
+        except KeyError:
+            return
+
+        distance = haversine_distance(cur_lat, cur_lon, wp["lat"], wp["lon"])
+        logger.info(f"[MissionManager] sprayer distance to waypoint: {distance:.2f}m")
+
+        CRUISE_ALT = 5.0
+        SPRAY_ALT = 1.0
+        WAYPOINT_RADIUS = 1.0
+        CROP_RADIUS = 0.5
+
+        is_last_waypoint = sprayer_current_wp_index == len(sprayer_waypoints) - 1
+
+        # ──────────────────────────────
+        # 1. Normal waypoint navigation
+        # ──────────────────────────────
+        if not is_last_waypoint:
+            if distance < WAYPOINT_RADIUS:
+                logger.info("[MissionManager] sprayer reached waypoint")
+
+                clear_active_waypoint("sprayer")
+
+                await redis.client.incr("path_planner:current_sprayer_waypoint_index")
+
+                await redis.publish(
+                    "mission_manager:request_next_waypoint",
+                    {
+                        "drone_id": "sprayer",
+                        "lat": cur_lat,
+                        "lon": cur_lon
+                    }
+                )
+            return
+
+        # ──────────────────────────────
+        # 2. Crop waypoint reached
+        # ──────────────────────────────
+        if drone["mode"] == "NAVIGATING_TO_WAYPOINT" and distance < CROP_RADIUS:
+            logger.info("[MissionManager] sprayer reached crop → descending")
+
+            drone["mode"] = "DESCENDING_TO_SPRAY"
+            await sync_state_to_redis()
+
+            mav.send_waypoint_latlon(
+                "sprayer",
+                wp["lat"],
+                wp["lon"],
+                SPRAY_ALT
+            )
+            return
+
+        # ──────────────────────────────
+        # 3. At spray altitude → spray
+        # ──────────────────────────────
+        if drone["mode"] == "DESCENDING_TO_SPRAY":
+            if abs(cur_alt - SPRAY_ALT) < 0.3:
+                logger.info("[MissionManager] sprayer at spray altitude → START_SPRAYING")
+
+                drone["mode"] = "SPRAYING"
+                await sync_state_to_redis()
+
+                # Custom MAVLink command (no args)
+                mav.sprayer.mav.command_long_send(
+                    mav.sprayer.target_system,
+                    mav.sprayer.target_component,
+                    mavutil.mavlink.MAV_CMD_USER_1,  # START_SPRAYING
+                    0, 0, 0, 0, 0, 0, 0, 0
+                )
+            return
+
+        # ──────────────────────────────
+        # 4. After spraying → ascend
+        # (sprayer auto-stops after preset time)
+        # ──────────────────────────────
+        if drone["mode"] == "SPRAYING":
+            logger.info("[MissionManager] spraying finished → ascending")
+
+            drone["mode"] = "ASCENDING_AFTER_SPRAY"
+            await sync_state_to_redis()
+
+            mav.send_waypoint_latlon(
+                "sprayer",
+                wp["lat"],
+                wp["lon"],
+                CRUISE_ALT
+            )
+            return
+
+        # ──────────────────────────────
+        # 5. Back to cruise altitude → next crop
+        # ──────────────────────────────
+        if drone["mode"] == "ASCENDING_AFTER_SPRAY":
+            if abs(cur_alt - CRUISE_ALT) < 0.3:
+                logger.info("[MissionManager] sprayer ready for next crop")
+
+                clear_active_waypoint("sprayer")
+                await redis.client.incr("path_planner:current_crop_target_index")
+
+                await redis.publish(
+                    "mission_manager:request_next_waypoint",
+                    {"drone_id": "sprayer"}
+                )
 
 @redis.listen("system_mode")
 async def handle_system_mode(mode):
