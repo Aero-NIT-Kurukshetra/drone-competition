@@ -3,12 +3,12 @@ import process from "process";
 
 export default class RedisClient {
     constructor({ workerId = "worker_1" } = {}) {
-        this.host = process.env.REDIS_HOST || "panel.silentjungle.tech";
-        this.port = process.env.REDIS_PORT || 50009;
+        this.host = process.env.REDIS_HOST || "none";
+        this.port = process.env.REDIS_PORT || NaN;
         this.username = process.env.REDIS_USERNAME && process.env.REDIS_USERNAME.trim() !== ""
             ? process.env.REDIS_USERNAME
             : undefined;
-        this.password = process.env.REDIS_PASSWORD || "DAMkMn9g6WMZaHqK29L4VxNQW7gFYpgu";
+        this.password = process.env.REDIS_PASSWORD || NaN;
 
         this.workerId = workerId;
 
