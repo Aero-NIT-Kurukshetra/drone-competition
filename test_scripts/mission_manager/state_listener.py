@@ -1,54 +1,60 @@
 import asyncio
 import logging
-import signal
-import time
+
+from jsondiff import symbols
+import jsondiff
+
 from common.redis_client import RedisClient
-from workers.SETTINGS import WORKER_ID_PLACEHOLDER
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
 )
-
 logger = logging.getLogger(__name__)
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 shutdown_event = asyncio.Event()
 
-WORKER_ID = WORKER_ID_PLACEHOLDER
-
+WORKER_ID = "test_worker"
 redis = RedisClient(loop=loop, worker_id=WORKER_ID)
 
-@redis.listen("event:dummy_in")
-async def handle_dummy_event(data):
-    logger.info(f"[{WORKER_ID}] Received dummy event: {data}")
+last_state = None
+IGNORE_KEYS = {"timestamp", "last_pose_ts"}
 
-async def heartbeat_loop():
-    while not shutdown_event.is_set():
-        try:
-            await redis.heartbeat()
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
-        await asyncio.sleep(1)
 
-async def publish_dummy_event():
-    message = {
-        "worker_id": WORKER_ID,
-        "event": "dummy_event",
-        "timestamp": time.time()
-    }
-    try:
-        await redis.publish("event:dummy_out", message)
-        logger.info(f"[{WORKER_ID}] Sent dummy event: {message}")
-    except Exception as e:
-        logger.error(f"Publish failed: {e}")
+def print_state_diff(diff, prev_state, path=None):
+    if path is None:
+        path = []
 
-async def worker_job():
-    # implement entire worker logic here
-    # here we just send a dummy event, this could be replaced with real work
-    await publish_dummy_event()
+    for key, value in diff.items():
+        if key in IGNORE_KEYS:
+            continue
+
+        # Recurse into nested dicts
+        if isinstance(value, dict):
+            print_state_diff(value, prev_state, path + [key])
+            continue
+
+        # Leaf change
+        old_val = prev_state
+        for p in path + [key]:
+            old_val = old_val.get(p, None) if isinstance(old_val, dict) else None
+
+        # Extract drone name
+        drone = path[1] if len(path) >= 2 and path[0] == "drones" else "unknown"
+
+        print(f"[{drone}] {key}: {old_val} → {value}")
+
+@redis.listen("mission:state_update")
+async def handle_state_update(message):
+    global last_state
+
+    if last_state:
+        diff = jsondiff.diff(last_state, message)
+        print_state_diff(diff, last_state)
+
+    last_state = message
 
 async def main(loop):
     await redis.connect()
@@ -60,7 +66,6 @@ async def main(loop):
     # but in real worker if theres a different behaviour for recovery mode, tasks[] would be adjusted accordingly
     tasks = [
         loop.create_task(heartbeat_loop()),
-        loop.create_task(worker_job())
     ]
 
     await shutdown_event.wait()
@@ -70,6 +75,15 @@ async def main(loop):
         task.cancel()
 
     await redis.close()
+
+
+async def heartbeat_loop():
+    while not shutdown_event.is_set():
+        try:
+            await redis.heartbeat()
+        except Exception as e:
+            logger.error(f"Heartbeat error: {e}")
+        await asyncio.sleep(1)
 
 def handle_shutdown():
     logger.info("Shutdown signal received")

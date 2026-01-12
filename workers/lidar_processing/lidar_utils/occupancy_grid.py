@@ -1,9 +1,10 @@
 import numpy as np
+from workers.SETTINGS import LIDAR_MAP_SIZE, LIDAR_GRID_RESOLUTION, LIDAR_GRID_SIZE
 
 # Map parameters
-MAP_SIZE = 5.0        # meters (40 x 40)
-RESOLUTION = 0.2       # meters per cell
-GRID_SIZE = int(MAP_SIZE / RESOLUTION)
+MAP_SIZE = LIDAR_MAP_SIZE
+RESOLUTION = LIDAR_GRID_RESOLUTION
+GRID_SIZE = LIDAR_GRID_SIZE
 
 def create_occupancy_grid():
     """

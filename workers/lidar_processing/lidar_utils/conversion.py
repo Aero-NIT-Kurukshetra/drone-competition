@@ -1,6 +1,5 @@
 import math
-
-EARTH_RADIUS = 6378137  # meters
+from workers.SETTINGS import EARTH_RADIUS
 
 def gps_to_local(lat, lon, lat0, lon0):
     """
@@ -46,9 +45,6 @@ def lidar_to_map(x_l, y_l, x_d, y_d, yaw_deg):
 
 
     return x_m, y_m
-import math
-
-EARTH_RADIUS = 6378137.0  # meters
 
 def map_to_gps(x, y, lat0, lon0):
     """

@@ -15,13 +15,21 @@ from common.redis_client import RedisClient
 from workers.path_planning.planner_utils.astar import astar
 from workers.path_planning.planner_utils.conversion import map_to_grid, grid_to_map,map_to_gps,gps_to_local
 from workers.path_planning.planner_utils.path_utils import simplify_path,has_line_of_sight,smooth_path_los
+from workers.SETTINGS import (
+    WORKER_ID_PATH_PLANNER,
+    PATH_PLANNING_ALTITUDE,
+    PATH_PLANNING_MAP_SIZE,
+    PATH_PLANNING_RESOLUTION,
+    PATH_PLANNING_GRID_SIZE,
+    LAT0,
+    LON0,
+    MARGIN_DISTANCE_M,
+)
 
-ALTITUDE = 10.0  # meters (fixed altitude)
-MAP_SIZE = 40.0        # meters (40 x 40)
-RESOLUTION = 0.2       # meters per cell
-GRID_SIZE = int(MAP_SIZE / RESOLUTION)
-LAT0 = 37.4275        # Reference latitude
-LON0 = -122.1697      # Reference longitude
+ALTITUDE = PATH_PLANNING_ALTITUDE
+MAP_SIZE = PATH_PLANNING_MAP_SIZE
+RESOLUTION = PATH_PLANNING_RESOLUTION
+GRID_SIZE = PATH_PLANNING_GRID_SIZE
 
 
 logging.basicConfig(
@@ -35,10 +43,8 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 shutdown_event = asyncio.Event()
 
-WORKER_ID = "path_planner_worker"
+WORKER_ID = WORKER_ID_PATH_PLANNER
 redis = RedisClient(loop=loop, worker_id=WORKER_ID)
-
-MARGIN_DISTANCE_M = 2  # meters
 
 def read_kml_polygon_from_xml(kml_xml: str) -> Polygon:
     root = ET.fromstring(kml_xml)

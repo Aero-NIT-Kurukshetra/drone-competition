@@ -1,12 +1,15 @@
 import math
-
+from workers.SETTINGS import (
+    PATH_PLANNING_MAP_SIZE,
+    PATH_PLANNING_RESOLUTION,
+    PATH_PLANNING_GRID_SIZE,
+    EARTH_RADIUS,
+)
 
 # Map parameters
-MAP_SIZE = 40.0        # meters (40 x 40)
-RESOLUTION = 0.2       # meters per cell
-GRID_SIZE = int(MAP_SIZE / RESOLUTION)
-
-EARTH_RADIUS = 6378137  # meters
+MAP_SIZE = PATH_PLANNING_MAP_SIZE
+RESOLUTION = PATH_PLANNING_RESOLUTION
+GRID_SIZE = PATH_PLANNING_GRID_SIZE
 
 def gps_to_local(lat, lon, lat0, lon0):
     """
@@ -52,9 +55,6 @@ def lidar_to_map(x_l, y_l, x_d, y_d, yaw_deg):
 
 
     return x_m, y_m
-import math
-
-EARTH_RADIUS = 6378137.0  # meters
 
 def map_to_gps(x, y, lat0, lon0):
     """

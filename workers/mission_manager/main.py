@@ -12,6 +12,14 @@ load_dotenv()
 
 from common.redis_client import RedisClient
 from workers.mission_manager.mavlink_manager import MAVLinkManager
+from workers.SETTINGS import (
+    WORKER_ID_MISSION_MANAGER,
+    DRONES,
+    STATE_REDIS_KEY,
+    STATE_REDIS_DRONE_KEY,
+    STATE_PUBLISH_CHANNEL,
+    DEFAULT_ALTITUDE,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +29,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("MissionManager")
 
-WORKER_ID = "mission_manager"
+WORKER_ID = WORKER_ID_MISSION_MANAGER
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -30,8 +38,6 @@ shutdown_event = asyncio.Event()
 redis = RedisClient(loop=loop, worker_id=WORKER_ID)
 
 mav: MAVLinkManager | None = None
-
-DRONES = ("scout", "sprayer")
 
 def default_drone_state():
     return {
@@ -42,13 +48,9 @@ def default_drone_state():
         "current_loc": {
             "lat": None,
             "lon": None,
-            "alt": 5.0
+            "alt": DEFAULT_ALTITUDE
             }
     }
-
-STATE_REDIS_KEY = "mission:state"
-STATE_REDIS_DRONE_KEY = "mission:state:{}"
-STATE_PUBLISH_CHANNEL = "mission:state_update"
 
 mission_state: Dict[str, Any] = {
     "system_mode": "NORMAL",
@@ -287,7 +289,7 @@ async def dispatch_sprayer_to_next_crop():
         "mission_manager:request_next_waypoint",
         {
             "drone_id": "sprayer",
-            "target": data["location"]
+            # "target": data["location"]
         }
     )
 

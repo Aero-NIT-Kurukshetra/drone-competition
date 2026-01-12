@@ -4,12 +4,13 @@ import time
 import logging
 from pymavlink import mavutil
 from common.redis_client import RedisClient
+from workers.SETTINGS import MAVLINK_MAX_PER_TICK, MAVLINK_MAX_LATENCY_S
 
 logger = logging.getLogger(__name__)
 
 class MAVLinkManager:
-    MAX_PER_TICK = 50          # fairness cap
-    MAX_LATENCY_S = 0.5        # drop stale data
+    MAX_PER_TICK = MAVLINK_MAX_PER_TICK
+    MAX_LATENCY_S = MAVLINK_MAX_LATENCY_S
 
     def __init__(self, redis: RedisClient, scout_uri: str, sprayer_uri: str, loop: asyncio.AbstractEventLoop = None):
         self.redis = redis
