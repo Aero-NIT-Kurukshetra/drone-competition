@@ -97,6 +97,8 @@ class MAVLinkManager:
             self.loop.create_task(
                 self._handle_obstacle_distance(msg)
             )
+        elif t == "SYS_STATUS":   
+            self.loop.create_task(self._handle_battery(msg, drone_id))
 
     def _handle_system_time(self, msg):
         self._boot_time_offset = (
@@ -200,6 +202,30 @@ class MAVLinkManager:
                 mode_id
             )
         logger.info(f"[MAVLink] Set drones to GUIDED mode")
+    async def _handle_battery(self, msg, drone_id):
+        """
+        SYS_STATUS battery fields:
+        voltage_battery: mV
+        current_battery: cA
+        battery_remaining: %
+        """
+
+        # Some FCs send -1 when data is unavailable
+        if msg.voltage_battery <= 0:
+            return
+
+        payload = {
+            "drone_id": drone_id,
+            "voltage_v": msg.voltage_battery / 1000.0,
+            "current_a": msg.current_battery / 100.0 if msg.current_battery != -1 else None,
+            "remaining_pct": msg.battery_remaining,
+            "timestamp": time.time()
+        }
+        await self.redis.publish(
+            "mission_manager:drone_battery_update",
+            payload
+        )
+
 
     def arm_and_takeoff(self, drone_id, altitude):
         link = self.scout if drone_id == "scout" else self.sprayer
