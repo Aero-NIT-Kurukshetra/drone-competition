@@ -38,7 +38,12 @@ def default_drone_state():
         "mode": "IDLE",            # FSM state (NAVIGATING, HALTED, SPRAYING, etc.)
         "active_waypoint": None,   # dict or None
         "halted": False,
-        "last_pose_ts": None,
+        "last_pose_ts": None,# timestamp of last pose update
+        "current_loc": {
+            "lat": None,
+            "lon": None,
+            "alt": 5.0
+            }
     }
 
 STATE_REDIS_KEY = "mission:state"
@@ -282,8 +287,7 @@ async def dispatch_sprayer_to_next_crop():
         "mission_manager:request_next_waypoint",
         {
             "drone_id": "sprayer",
-            "lat": crop["lat"],
-            "lon": crop["lon"],
+            "target": data["location"]
         }
     )
 
@@ -342,6 +346,9 @@ async def handle_pose_update(data):
             )
 
     elif drone_id == "sprayer" and sprayer_waypoints:
+        mission_state["drones"][drone_id]["current_loc"]["lat"] = data["lat"]
+        mission_state["drones"][drone_id]["current_loc"]["lon"] = data["lon"]
+
         waypoints_data = json.loads(sprayer_waypoints)
         sprayer_waypoints = waypoints_data["waypoints"]
         sprayer_current_wp_index = int(sprayer_current_wp_index)
