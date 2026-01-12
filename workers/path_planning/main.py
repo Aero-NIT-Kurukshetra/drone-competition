@@ -330,7 +330,7 @@ async def handle_request_next_waypoint(data):
             "path_planning:planned_waypoint",
             {"drone_id": drone_id, "waypoint": next_wp}
         )
-
+        await redis.client.publish("path_planner:total_scout_waypoints", str(len(current_scout_waypoints)))
         await redis.client.set("path_planner:current_scout_waypoint_index", str(current_waypoint + 1))
 
 async def heartbeat_loop():
