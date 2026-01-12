@@ -9,7 +9,7 @@
 			},
 			{
 				"name": "Sprayer SITL",
-				"command": "arducopter.exe --model quad --defaults default_params/sprayer.parm --serial0 udpclient:127.0.0.1:14551 --serial1 udpclient:127.0.0.1:13560 --serial2 udpclient:127.0.0.1:13561 --home 29.949623,76.816050,0,0",
+				"command": "arducopter.exe --model quad --defaults default_params/sprayer.parm --serial0 udpclient:127.0.0.1:14551 --serial1 udpclient:127.0.0.1:13560 --serial2 udpclient:127.0.0.1:13561 --home 29.9494244,76.8157411,0,0",
 				"color": "lightgreen",
 				"focus": true
 			},
