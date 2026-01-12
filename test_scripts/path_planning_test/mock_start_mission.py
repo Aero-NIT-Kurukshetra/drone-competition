@@ -29,7 +29,12 @@ waypoints = {
     "waypoints": [
         {"lat": 29.949619679, "lon": 76.816557621, "alt_m": 5.0}, 
         {"lat": 29.949705818, "lon": 76.816615018, "alt_m": 5.0}, 
-        {"lat": 29.949797999, "lon": 76.816624577, "alt_m": 5.0}
+        {"lat": 29.949797999, "lon": 76.816624577, "alt_m": 5.0}, 
+        {"lat": 29.949568405, "lon": 76.816471592, "alt_m": 5.0}, 
+        {"lat": 29.949517131, "lon": 76.816385562, "alt_m": 5.0}, 
+        {"lat": 29.949890181, "lon": 76.816634136, "alt_m": 5.0}, 
+        {"lat": 29.949982362, "lon": 76.816643695, "alt_m": 5.0}, 
+        {"lat": 29.949465857, "lon": 76.816299533, "alt_m": 5.0},
     ], 
     "timestamp": 1768156109.9498596
 }
@@ -51,8 +56,8 @@ async def main(kml_path: str):
     await redis.connect()
 
     logger.info("Sending KML to path planner...")
-    # await redis.publish("mission_manager:scout_planning_request", payload)
-    await redis.client.set("path_planner:scout_waypoints", json.dumps(waypoints))
+    await redis.publish("mission_manager:scout_planning_request", payload)
+    # await redis.client.set("path_planner:scout_waypoints", json.dumps(waypoints))
     await redis.client.set("path_planner:current_scout_waypoint_index", "0")
 
     # SET INTIAL VARIABLE

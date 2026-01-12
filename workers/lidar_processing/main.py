@@ -17,7 +17,16 @@ from workers.lidar_processing.lidar_utils.downsampling import angular_downsample
 
 from matplotlib import pyplot as plt
 from workers.lidar_processing.lidar_utils.occupancy_grid import map_to_grid,create_occupancy_grid,update_grid_from_scan,inflate_obstacles
-
+from workers.SETTINGS import (
+    WORKER_ID_LIDAR,
+    LIDAR_GRID_SIZE,
+    LIDAR_GRID_RESOLUTION,
+    DIST_UNKNOWN_MM,
+    DIST_MIN_MM,
+    DIST_MAX_MM,
+    PLOT_INTERVAL,
+    INFLATION_RADIUS_CELLS,
+)
 
 MAX_LIMIT=3
 
@@ -55,7 +64,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-WORKER_ID = "lidar_worker"
+WORKER_ID = WORKER_ID_LIDAR
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -64,11 +73,8 @@ shutdown_event = asyncio.Event()
 redis = RedisClient(loop=loop, worker_id=WORKER_ID)
 
 # Grid config
-GRID_SIZE = 65
-GRID_RESOLUTION = 0.1  # meters per cell
-DIST_UNKNOWN_MM = 65535
-DIST_MIN_MM = 20
-DIST_MAX_MM = 1400
+GRID_SIZE = LIDAR_GRID_SIZE
+GRID_RESOLUTION = LIDAR_GRID_RESOLUTION
 
 # Global state
 occupancy_grid = create_occupancy_grid()
@@ -89,9 +95,6 @@ time_boot_us = 0
 # img_inflated = None
 # robot_dot_inflated = None
 # last_plot_time = 0
-
-
-PLOT_INTERVAL = 0.2  # Update plot max 5 times per second
 
 
 
@@ -149,7 +152,6 @@ def update_grid(x_d: float, y_d: float, yaw_deg: float,
     
     update_grid_from_scan(points_map, occupancy_grid, (x_d, y_d, yaw_deg))
     
-    INFLATION_RADIUS_CELLS = 1
     inflated_grid = inflate_obstacles(occupancy_grid, INFLATION_RADIUS_CELLS)
 
     # Update plot only if interval has passed and plots are initialized

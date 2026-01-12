@@ -6,6 +6,16 @@ import cv2
 import numpy as np
 
 from common.redis_client import RedisClient
+from workers.SETTINGS import (
+    WORKER_ID_CAMERA,
+    CAMERA_MODE,
+    CAMERA_ALTITUDE,
+    CAMERA_HFOV_DEG,
+    CAMERA_VFOV_DEG,
+    REDIS_GEO_KEY,
+    REDIS_EVENT_CHANNEL,
+    DUPLICATE_RADIUS_METERS,
+)
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -17,8 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------- WORKER CONFIG ----------------
-WORKER_ID = "camera_worker"
-CAMERA_MODE = "scout"     # "scout" or "sprayer"
+WORKER_ID = WORKER_ID_CAMERA
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -27,15 +36,9 @@ shutdown_event = asyncio.Event()
 redis = RedisClient(loop=loop, worker_id=WORKER_ID)
 
 # ---------------- CAMERA & GEO PARAMS ----------------
-ALTITUDE = 5.0  # meters
-HFOV = math.radians(78)
-VFOV = math.radians(64)
-
-REDIS_GEO_KEY = "diseased_crops"
-REDIS_EVENT_CHANNEL = "event:crop_detected"
-
-# duplicate suppression (distance only)
-DUPLICATE_RADIUS_METERS = 0.5
+ALTITUDE = CAMERA_ALTITUDE
+HFOV = math.radians(CAMERA_HFOV_DEG)
+VFOV = math.radians(CAMERA_VFOV_DEG)
 
 # ---------------- STATE ----------------
 cap = None
@@ -188,7 +191,7 @@ async def camera_loop():
                 # 3. Publish event:spray_feedback / event:spray_completed
                 pass
 
-        await asyncio.sleep(0.05)  # ~20 FPS
+        # await asyncio.sleep(0.05)  # ~20 FPS
 
 # ---------------- HEARTBEAT ----------------
 async def heartbeat_loop():

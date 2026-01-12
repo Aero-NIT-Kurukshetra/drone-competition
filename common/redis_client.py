@@ -25,6 +25,7 @@ class RedisClient:
         self.worker_id = worker_id
         
         self.client: aioredis.Redis | None = None
+        self.pubsub_client: aioredis.Redis | None = None
         self.listeners: Dict[str, Callable[[Any], Awaitable[None]]] = {}
 
         self.init = False
@@ -47,6 +48,20 @@ class RedisClient:
                 await self.client.ping()
                 logger.info(f"[RedisClient] Connected to Redis at {self.__host}:{self.__port}")
 
+                self.pubsub_client = aioredis.Redis(
+                    host=self.__host,
+                    port=self.__port,
+                    username=self.__username,
+                    password=self.__password,
+                    db=0,
+                    decode_responses=True,
+                    socket_connect_timeout=15,
+                    socket_keepalive=True,
+                    health_check_interval=30
+                )
+                await self.pubsub_client.ping()
+                logger.info(f"[RedisClient] Pub/Sub client connected to Redis at {self.__host}:{self.__port}")
+
                 # send state
                 await self.client.set(f"state:{self.worker_id}", json.dumps({
                     "status": "running",
@@ -64,7 +79,7 @@ class RedisClient:
     async def pubsub_loop(self):
         while True:
             try:
-                pubsub = self.client.pubsub()
+                pubsub = self.pubsub_client.pubsub()
                 for channel, callback in self.listeners.items():
                     await pubsub.subscribe(channel)
                     logger.info(f"[RedisClient] Subscribed to channel '{channel}'")
@@ -161,7 +176,7 @@ class RedisClient:
         if not self.client:
             raise RuntimeError("Redis client is not connected")
 
-        await self.client.publish(channel, json.dumps(message))
+        await self.pubsub_client.publish(channel, json.dumps(message))
         logger.debug(f"[RedisClient] Published message to channel '{channel}': {message}")
 
     async def heartbeat(self):

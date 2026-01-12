@@ -3,6 +3,7 @@ import logging
 import time
 import math
 import xml.etree.ElementTree as ET
+import numpy as np
 
 from shapely.geometry import Polygon, LineString, MultiLineString
 from shapely.affinity import rotate, translate
@@ -10,6 +11,26 @@ from pyproj import Transformer
 import json
 
 from common.redis_client import RedisClient
+
+from workers.path_planning.planner_utils.astar import astar
+from workers.path_planning.planner_utils.conversion import map_to_grid, grid_to_map,map_to_gps,gps_to_local
+from workers.path_planning.planner_utils.path_utils import simplify_path,has_line_of_sight,smooth_path_los
+from workers.SETTINGS import (
+    WORKER_ID_PATH_PLANNER,
+    PATH_PLANNING_ALTITUDE,
+    PATH_PLANNING_MAP_SIZE,
+    PATH_PLANNING_RESOLUTION,
+    PATH_PLANNING_GRID_SIZE,
+    LAT0,
+    LON0,
+    MARGIN_DISTANCE_M,
+)
+
+ALTITUDE = PATH_PLANNING_ALTITUDE
+MAP_SIZE = PATH_PLANNING_MAP_SIZE
+RESOLUTION = PATH_PLANNING_RESOLUTION
+GRID_SIZE = PATH_PLANNING_GRID_SIZE
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,10 +43,8 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 shutdown_event = asyncio.Event()
 
-WORKER_ID = "path_planner_worker"
+WORKER_ID = WORKER_ID_PATH_PLANNER
 redis = RedisClient(loop=loop, worker_id=WORKER_ID)
-
-MARGIN_DISTANCE_M = 2  # meters
 
 def read_kml_polygon_from_xml(kml_xml: str) -> Polygon:
     root = ET.fromstring(kml_xml)
@@ -182,6 +201,7 @@ async def handle_sprayer_planning_request(data: dict):
         }
     }
     """
+
     logger.info(f"[{WORKER_ID}] Sprayer planning request received")
 
     drone_pose = data.get("drone_pose", {})
@@ -225,22 +245,79 @@ async def handle_sprayer_planning_request(data: dict):
         f"at lat={target_crop['lat']}, lon={target_crop['lon']}"
     )
     
-    # TODO: Implement A* pathfinding here
-    # A* will use:
-    #   - drone_pose as START position
-    #   - target_crop as GOAL position  
-    #   - occupancy_grid to avoid obstacles
-    # Output: list of intermediate waypoints from start to goal
+    # Fetch occupancy grid from Redis
+    occupancy_grid_raw = await redis.client.get("occupancy_grid")
     
-    sprayer_waypoints = []
-    
-    # For now, direct path to target (A* will add intermediate points)
-    # Target crop location
-    sprayer_waypoints.append({
-        "lat": target_crop["lat"],
-        "lon": target_crop["lon"],
-        "alt_m": target_crop.get("alt_m", target_crop.get("alt", 5.0))
-    })
+    if not occupancy_grid_raw:
+        logger.warning(f"[{WORKER_ID}] No occupancy grid available, using direct path")
+        # Fallback: direct path to target
+        sprayer_waypoints = [{
+            "lat": target_crop["lat"],
+            "lon": target_crop["lon"],
+            "alt_m": target_crop.get("alt_m", target_crop.get("alt", 5.0))
+        }]
+    else:
+        # Decode bytes back to numpy array
+        inflated_grid = np.frombuffer(occupancy_grid_raw, dtype=np.uint8).reshape(
+            (GRID_SIZE, GRID_SIZE)
+        )
+        
+        x_start, y_start = gps_to_local(drone_pose.get("lat", LAT0), drone_pose.get("lon", LON0), LAT0, LON0)
+        x_goal, y_goal = gps_to_local(target_crop['lat'], target_crop['lon'], LAT0, LON0)
+        
+        start_cell = map_to_grid(x_start, y_start)
+        goal_cell  = map_to_grid(x_goal, y_goal)
+
+        # Handle out-of-bounds cells
+        if start_cell is None or goal_cell is None:
+            logger.warning(f"[{WORKER_ID}] Start or goal out of grid bounds")
+            await redis.publish(
+                "event:no_safe_path",
+                {"drone_id": "sprayer", "reason": "out_of_bounds"}
+            )
+            return
+        
+        path = astar(inflated_grid, start_cell, goal_cell)
+
+        # Handle no path found
+        if path is None or len(path) == 0:
+            logger.warning(f"[{WORKER_ID}] A* found no path to crop")
+            await redis.publish(
+                "event:no_safe_path",
+                {"drone_id": "sprayer", "reason": "no_path"}
+            )
+            return
+        
+        map_path = []
+        for gx, gy in path:
+            x, y = grid_to_map(gx, gy, MAP_SIZE, RESOLUTION)
+            map_path.append((x, y))
+        
+        simplified_path = simplify_path(map_path)
+        smoothed_path = smooth_path_los(
+            simplified_path,
+            inflated_grid,
+            MAP_SIZE,
+            RESOLUTION
+        )
+
+        # Fallback if smoothed path is empty
+        if len(smoothed_path) == 0:
+            logger.warning(f"[{WORKER_ID}] Smoothed path empty")
+            await redis.publish(
+                "event:no_safe_path",
+                {"drone_id": "sprayer", "reason": "empty_path"}
+            )
+            return
+
+        sprayer_waypoints = []
+        for x, y in smoothed_path:
+            wp_lat, wp_lon = map_to_gps(x, y, LAT0, LON0)
+            sprayer_waypoints.append({
+                "lat": wp_lat,
+                "lon": wp_lon,
+                "alt_m": target_crop.get("alt_m", target_crop.get("alt", 5.0))
+            })
     
     # Store waypoints in Redis
     await redis.client.set(

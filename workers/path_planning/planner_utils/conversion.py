@@ -1,5 +1,15 @@
 import math
-from workers.SETTINGS import EARTH_RADIUS
+from workers.SETTINGS import (
+    PATH_PLANNING_MAP_SIZE,
+    PATH_PLANNING_RESOLUTION,
+    PATH_PLANNING_GRID_SIZE,
+    EARTH_RADIUS,
+)
+
+# Map parameters
+MAP_SIZE = PATH_PLANNING_MAP_SIZE
+RESOLUTION = PATH_PLANNING_RESOLUTION
+GRID_SIZE = PATH_PLANNING_GRID_SIZE
 
 def gps_to_local(lat, lon, lat0, lon0):
     """
@@ -60,3 +70,28 @@ def map_to_gps(x, y, lat0, lon0):
     lon = lon0_rad + dlon
 
     return math.degrees(lat), math.degrees(lon)
+
+
+
+def grid_to_map(gx, gy, map_size, resolution):
+    """
+    Converts grid indices to map coordinates (meters)
+    """
+    x = gx * resolution - map_size / 2
+    y = gy * resolution - map_size / 2
+    return x, y
+
+
+# Map coordinates to grid indices
+def map_to_grid(x_m, y_m):
+    """
+    Converts map-frame coordinates (meters)
+    to grid indices
+    """
+    gx = int((x_m + MAP_SIZE / 2) / RESOLUTION)
+    gy = int((y_m + MAP_SIZE / 2) / RESOLUTION)
+
+    if 0 <= gx < GRID_SIZE and 0 <= gy < GRID_SIZE:
+        return gx, gy
+    else:
+        return None
