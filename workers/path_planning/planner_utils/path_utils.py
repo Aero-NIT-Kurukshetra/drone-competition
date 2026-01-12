@@ -29,12 +29,21 @@ def has_line_of_sight(p1, p2, inflated_grid, map_size, resolution):
     """
     Checks if straight line between p1 and p2 is obstacle-free
     p1, p2: (x, y) in map coordinates
+    
+    Returns False if any cell along the line is:
+        - obstacle (value=1)
+        - unexplored (value=2)
     """
     x1, y1 = p1
     x2, y2 = p2
+    
+    grid_size = inflated_grid.shape[0]
 
     dist = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
     steps = int(dist / resolution)
+    
+    if steps == 0:
+        return True
 
     for i in range(steps + 1):
         x = x1 + (x2 - x1) * i / steps
@@ -42,8 +51,14 @@ def has_line_of_sight(p1, p2, inflated_grid, map_size, resolution):
 
         gx = int((x + map_size/2) / resolution)
         gy = int((y + map_size/2) / resolution)
+        
+        # Check bounds
+        if not (0 <= gx < grid_size and 0 <= gy < grid_size):
+            return False
 
-        if inflated_grid[gx, gy] == 1:
+        # Grid is indexed as grid[row, col] = grid[gy, gx]
+        # Block if obstacle (1) or unexplored (2) - only free cells (0) are traversable
+        if inflated_grid[gy, gx] != 0:
             return False
 
     return True

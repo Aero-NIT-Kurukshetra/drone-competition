@@ -29,11 +29,20 @@ REDIS_EVENT_CHANNEL = "event:crop_detected"
 DUPLICATE_RADIUS_METERS = 0.5
 
 # ============================================
+# Path Planning Settings
+# ============================================
+PATH_PLANNING_ALTITUDE = 10.0   # meters (fixed altitude)
+PATH_PLANNING_MAP_SIZE = 200.0  # meters (200 x 200) - covers farm polygon
+PATH_PLANNING_RESOLUTION = 0.5  # meters per cell
+PATH_PLANNING_GRID_SIZE = int(PATH_PLANNING_MAP_SIZE / PATH_PLANNING_RESOLUTION)
+
+# ============================================
 # LiDAR Worker Settings
 # ============================================
-LIDAR_GRID_SIZE = 65
-LIDAR_GRID_RESOLUTION = 0.1  # meters per cell
-LIDAR_MAP_SIZE = 5.0         # meters (5 x 5)
+# LiDAR uses the same grid as path planner for consistency
+LIDAR_GRID_SIZE = PATH_PLANNING_GRID_SIZE
+LIDAR_GRID_RESOLUTION = PATH_PLANNING_RESOLUTION
+LIDAR_MAP_SIZE = PATH_PLANNING_MAP_SIZE
 
 DIST_UNKNOWN_MM = 65535
 DIST_MIN_MM = 20
@@ -43,17 +52,10 @@ PLOT_INTERVAL = 0.2  # Update plot max 5 times per second
 
 INFLATION_RADIUS_CELLS = 1
 
-# ============================================
-# Path Planning Settings
-# ============================================
-PATH_PLANNING_ALTITUDE = 10.0   # meters (fixed altitude)
-PATH_PLANNING_MAP_SIZE = 40.0   # meters (40 x 40)
-PATH_PLANNING_RESOLUTION = 0.2  # meters per cell
-PATH_PLANNING_GRID_SIZE = int(PATH_PLANNING_MAP_SIZE / PATH_PLANNING_RESOLUTION)
-
-# Reference GPS coordinates
-LAT0 = 37.4275
-LON0 = -122.1697
+# Reference GPS coordinates (center of farm polygon from NIDAR.kml)
+# Polygon bounds: lat 29.9494-29.9508, lon 76.8159-76.8167
+LAT0 = 29.95010  # center latitude of farm
+LON0 = 76.81630  # center longitude of farm
 
 MARGIN_DISTANCE_M = 2  # meters
 
@@ -71,3 +73,18 @@ STATE_REDIS_KEY = "mission:state"
 STATE_REDIS_DRONE_KEY = "mission:state:{}"
 STATE_PUBLISH_CHANNEL = "mission:state_update"
 DEFAULT_ALTITUDE = 5.0  # meters
+
+# Sprayer workflow settings
+SPRAYER_CRUISE_ALT = 5.0        # meters - altitude for navigation
+SPRAYER_SPRAY_ALT = 2.0         # meters - altitude for spraying (must be > 1m to avoid ground effect)
+SPRAYER_WAYPOINT_RADIUS = 1.0   # meters - radius to consider waypoint reached
+SPRAYER_CROP_RADIUS = 0.5       # meters - radius to consider crop reached
+SPRAYER_HOVER_TIME = 1.0        # seconds - hover time for center correction
+SPRAYER_SPRAY_DURATION = 20.0    # seconds - sprayer mechanism trigger duration (mock)
+
+# ============================================
+# Occupancy Grid Cell Values
+# ============================================
+GRID_FREE = 0           # Explored and free to traverse
+GRID_OBSTACLE = 1       # Explored and blocked (obstacle)
+GRID_UNEXPLORED = 2     # Not yet explored by scout

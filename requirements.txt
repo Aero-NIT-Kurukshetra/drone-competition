@@ -2,3 +2,4 @@ shapely
 pyproj
 simplekml
 redis
+pymavlink

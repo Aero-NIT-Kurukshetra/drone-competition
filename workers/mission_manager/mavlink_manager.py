@@ -1,4 +1,5 @@
 import asyncio
+import json
 import struct
 import time
 import logging
@@ -112,8 +113,8 @@ class MAVLinkManager:
             self.loop.create_task(self._handle_battery(msg, drone_id))
         elif t == "GPS_RAW_INT":
             self.loop.create_task(
-            self._handle_gps_status(msg, drone_id)
-         )
+                self._handle_gps_status(msg, drone_id)
+            )
 
         elif t in ["SPRAYER_COMMAND", "SPRAYER_FINISHED", "CROP_DETECTED"]:
             print(f"[MAVLink] Received {t} from {drone_id}: {msg.to_dict()}")
@@ -282,7 +283,7 @@ class MAVLinkManager:
             payload
         )
 
-    def _handle_gps_status(self, msg, drone_id):
+    async def _handle_gps_status(self, msg, drone_id):
         """
         GPS_RAW_INT fields:
         fix_type:
@@ -302,33 +303,61 @@ class MAVLinkManager:
             "timestamp": time.time()
         }
 
-        self.loop.create_task(
-            self.redis.publish(
+        
+        await self.redis.publish(
                 "mission_manager:drone_gps_status",
                 payload
             )
-        )
-    def arm_and_takeoff(self, drone_id, altitude):
-        link = self.scout if drone_id == "scout" else self.sprayer
 
-        # Arm
+    async def arm_and_takeoff(self, drone_id, altitude):
+        """Arm and takeoff a drone. Must be called from async context."""
+        link = self.scout if drone_id == "scout" else self.sprayer
+        
+        logger.info(f"[MAVLink] Setting {drone_id} to GUIDED mode")
+        
+        # First ensure GUIDED mode
+        mode_id = link.mode_mapping().get("GUIDED", 4)
+        link.mav.set_mode_send(
+            link.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            mode_id
+        )
+        await asyncio.sleep(1)  # Wait for mode change
+        
+        logger.info(f"[MAVLink] Arming {drone_id}")
+        
+        # Arm the drone
         link.mav.command_long_send(
             link.target_system,
             link.target_component,
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
-            1, 0, 0, 0, 0, 0, 0
+            1,  # arm
+            0, 0, 0, 0, 0, 0
         )
-        time.sleep(2)
-
+        await asyncio.sleep(2)  # Wait for arming
+        
+        logger.info(f"[MAVLink] Taking off {drone_id} to {altitude}m")
+        
         # Takeoff
         link.mav.command_long_send(
-            link.target_system, link.target_component,
+            link.target_system, 
+            link.target_component,
             mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-            0, 0, 0, 0, 0, 0, 0, altitude
+            0,
+            0,  # pitch
+            0,  # empty
+            0,  # empty
+            0,  # yaw angle
+            0,  # lat (ignored)
+            0,  # lon (ignored)
+            altitude  # altitude
         )
+        
+        logger.info(f"[MAVLink] Takeoff command sent for {drone_id}")
 
-    def land_and_disarm(self, drone_id, force=False):
+    async def land_and_disarm(self, drone_id, force=False):
+        """Land and disarm a drone. Must be called from async context."""
         link = self.scout if drone_id == "scout" else self.sprayer
 
         if force:
@@ -338,9 +367,14 @@ class MAVLinkManager:
                 link.target_component,
                 mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
                 0,
-                21196, 0, 0, 0, 0, 0, 0
+                0,      # disarm
+                21196,  # force flag
+                0, 0, 0, 0, 0
             )
+            logger.info(f"[MAVLink] Force disarmed {drone_id}")
             return
+        
+        logger.info(f"[MAVLink] Landing {drone_id}")
         
         # Land
         link.mav.command_long_send(
@@ -349,14 +383,11 @@ class MAVLinkManager:
             0, 0, 0, 0, 0, 0, 0, 0
         )
 
-        while True:
-            msg = link.recv_match(type="LANDING_TARGET", blocking=True, timeout=5)
-            if msg:
-                break
+        # Wait for landing (non-blocking)
+        await asyncio.sleep(10)
 
-        logger.info(f"[MAVLink] {drone_id} landing initiated")
-        time.sleep(3)
-
+        logger.info(f"[MAVLink] Disarming {drone_id}")
+        
         link.mav.command_long_send(
             link.target_system,
             link.target_component,
@@ -364,6 +395,39 @@ class MAVLinkManager:
             0,
             0, 0, 0, 0, 0, 0, 0
         )
+        
+        logger.info(f"[MAVLink] {drone_id} landed and disarmed")
+
+    async def return_to_launch(self, drone_id):
+        """
+        Command drone to return to launch point and land.
+        Uses RTL mode which will automatically return to home and land.
+        """
+        link = self.scout if drone_id == "scout" else self.sprayer
+        
+        logger.info(f"[MAVLink] {drone_id} returning to launch")
+        
+        # Set RTL mode
+        mode_id = link.mode_mapping().get("RTL", 6)
+        link.mav.set_mode_send(
+            link.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            mode_id
+        )
+        
+        logger.info(f"[MAVLink] {drone_id} RTL mode set")
+
+        if drone_id == "scout":
+            # if sprayer mission_state is idle, command sprayer to RTL as well
+            sprayer_state = json.loads(await self.redis.get("mission:state"))["sprayer"]
+            if sprayer_state.lower() == "idle":
+                sprayer_mode_id = self.sprayer.mode_mapping().get("RTL", 6)
+                self.sprayer.mav.set_mode_send(
+                    self.sprayer.target_system,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    sprayer_mode_id
+                )
+                logger.info(f"[MAVLink] sprayer RTL mode set due to scout RTL")
 
     def send_waypoint(self, drone_id, x, y, z):
         link = self.scout if drone_id == "scout" else self.sprayer
@@ -413,11 +477,22 @@ class MAVLinkManager:
 
     def halt(self, drone_id):
         link = self.scout if drone_id == "scout" else self.sprayer
-        link.mav.command_long_send(
+        # link.mav.command_long_send(
+        #     link.target_system,
+        #     link.target_component,
+        #     mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM,
+        #     0, 0, 0, 0, 0, 0, 0, 0
+        # )
+        link.mav.set_position_target_local_ned_send(
+            0,
             link.target_system,
             link.target_component,
-            mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM,
-            0, 0, 0, 0, 0, 0, 0, 0
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            0b0000111111000000,  # position only
+            0, 0, 0,
+            0, 0, 0,
+            0, 0, 0,
+            0, 0
         )
 
 # testing

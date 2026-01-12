@@ -48,6 +48,21 @@ class RedisClient:
                 await self.client.ping()
                 logger.info(f"[RedisClient] Connected to Redis at {self.__host}:{self.__port}")
 
+                # Binary client for raw bytes (e.g., occupancy grid)
+                self.binary_client = aioredis.Redis(
+                    host=self.__host,
+                    port=self.__port,
+                    username=self.__username,
+                    password=self.__password,
+                    db=0,
+                    decode_responses=False,  # Keep as bytes
+                    socket_connect_timeout=15,
+                    socket_keepalive=True,
+                    health_check_interval=30
+                )
+                await self.binary_client.ping()
+                logger.info(f"[RedisClient] Binary client connected to Redis")
+
                 self.pubsub_client = aioredis.Redis(
                     host=self.__host,
                     port=self.__port,
@@ -77,8 +92,36 @@ class RedisClient:
                 await asyncio.sleep(2) # wait before retrying
 
     async def pubsub_loop(self):
+        pubsub = None
         while True:
             try:
+                # Clean up old pubsub if exists
+                if pubsub:
+                    try:
+                        await pubsub.unsubscribe()
+                        await pubsub.close()
+                    except Exception:
+                        pass
+                
+                # Verify connection is alive
+                try:
+                    await self.pubsub_client.ping()
+                except Exception as e:
+                    logger.warning(f"[RedisClient] Pubsub connection lost, reconnecting: {e}")
+                    self.pubsub_client = aioredis.Redis(
+                        host=self._RedisClient__host,
+                        port=self._RedisClient__port,
+                        username=self._RedisClient__username,
+                        password=self._RedisClient__password,
+                        db=0,
+                        decode_responses=True,
+                        socket_connect_timeout=15,
+                        socket_keepalive=True,
+                        health_check_interval=30
+                    )
+                    await self.pubsub_client.ping()
+                    logger.info(f"[RedisClient] Pubsub reconnected")
+                
                 pubsub = self.pubsub_client.pubsub()
                 for channel, callback in self.listeners.items():
                     await pubsub.subscribe(channel)
@@ -87,7 +130,6 @@ class RedisClient:
                 async for message in pubsub.listen():
                     if message['type'] == 'message':
                         channel = message['channel']
-                        # data = json.loads(message['data'])
                         data = message['data']
 
                         try:
@@ -97,15 +139,20 @@ class RedisClient:
 
                         callback = self.listeners.get(channel, None)
                         if callback:
-                            logging.debug(f"[RedisClient] Message received on channel '{channel}': {data}")
+                            logger.debug(f"[RedisClient] Message received on channel '{channel}'")
                             try:
-                                # await callback(data)
-                                asyncio.create_task(callback(data)) # run in separate task to avoid blocking
+                                asyncio.create_task(callback(data))
                             except Exception as e:
-                                logger.error(f"[RedisClient] Error in listener callback for channel '{channel}': {e}")
+                                logger.error(f"[RedisClient] Error creating task for '{channel}': {e}")
+                    elif message['type'] == 'subscribe':
+                        logger.debug(f"[RedisClient] Confirmed subscription to '{message['channel']}'")
+                        
+            except asyncio.CancelledError:
+                logger.info("[RedisClient] Pubsub loop cancelled")
+                break
             except Exception as e:
-                logger.error(f"[RedisClient] Error in listener loop: {e}")
-                await asyncio.sleep(2)  # wait before retrying
+                logger.error(f"[RedisClient] Error in listener loop: {e}, reconnecting in 2s...")
+                await asyncio.sleep(2)
 
     async def get_startup_mode(self) -> str:
         """Retrieve the startup mode from Redis"""
@@ -127,6 +174,10 @@ class RedisClient:
 
             await self.client.aclose()
             logger.info("[RedisClient] Connection closed")
+        
+        if hasattr(self, 'binary_client') and self.binary_client:
+            await self.binary_client.aclose()
+            logger.info("[RedisClient] Binary client closed")
 
     def add_listener(self, channel: str, callback: Callable[[Any], Awaitable[None]]):
         """

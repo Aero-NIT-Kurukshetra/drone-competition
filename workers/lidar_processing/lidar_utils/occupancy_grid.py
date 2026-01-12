@@ -1,5 +1,12 @@
 import numpy as np
-from workers.SETTINGS import LIDAR_MAP_SIZE, LIDAR_GRID_RESOLUTION, LIDAR_GRID_SIZE
+from workers.SETTINGS import (
+    LIDAR_MAP_SIZE, 
+    LIDAR_GRID_RESOLUTION, 
+    LIDAR_GRID_SIZE,
+    GRID_FREE,
+    GRID_OBSTACLE,
+    GRID_UNEXPLORED,
+)
 
 # Map parameters
 MAP_SIZE = LIDAR_MAP_SIZE
@@ -8,16 +15,14 @@ GRID_SIZE = LIDAR_GRID_SIZE
 
 def create_occupancy_grid():
     """
-    Creates an empty occupancy grid
-
+    Creates an occupancy grid initialized as unexplored.
     
+    Cell values (from SETTINGS):
+        GRID_FREE = 0       - Explored and free to traverse
+        GRID_OBSTACLE = 1   - Explored and blocked (obstacle)
+        GRID_UNEXPLORED = 2 - Not yet explored by scout
     """
-    """
-    0 = unknown
-    1 = occupied
-    2 = free
-    """
-    grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
+    grid = np.full((GRID_SIZE, GRID_SIZE), GRID_UNEXPLORED, dtype=np.uint8)
     return grid
 
 
@@ -40,7 +45,9 @@ def map_to_grid(x_m, y_m):
 
 def raytrace_free_space(x0, y0, x1, y1, grid):
     """
-    Marks free cells along a ray from (x0,y0) to (x1,y1)
+    Marks free cells along a ray from (x0,y0) to (x1,y1).
+    Only marks cells as free if they are currently unexplored.
+    Preserves obstacle cells (doesn't overwrite them).
     """
     steps = int(max(abs(x1 - x0), abs(y1 - y0)) / RESOLUTION)
     if steps <= 0:
@@ -53,30 +60,33 @@ def raytrace_free_space(x0, y0, x1, y1, grid):
         idx = map_to_grid(x, y)
         if idx is not None:
             gx, gy = idx
-            grid[gx, gy] = 2
-            # if grid[gx, gy] == 0 :  # don't overwrite occupied
-            #     grid[gx, gy] = 2
+            # Only mark as free if currently unexplored (preserve obstacles)
+            if grid[gx, gy] == GRID_UNEXPLORED:
+                grid[gx, gy] = GRID_FREE
 
 
 
 # Update occupancy grid from LiDAR points
-def update_grid_from_scan(points_map,grid,drone_pose):
+def update_grid_from_scan(points_map, grid, drone_pose):
     """
-    Updates occupancy grid using MAP-frame points
-    Uses ray tracing to mark free space and obstacles
+    Updates occupancy grid using MAP-frame points.
+    Uses ray tracing to mark free space and obstacles.
     
+    Cell values:
+        GRID_FREE = 0       - Explored and free to traverse
+        GRID_OBSTACLE = 1   - Explored and blocked (obstacle)
+        GRID_UNEXPLORED = 2 - Not yet explored by scout
     """
     x_d, y_d, yaw = drone_pose
     for (x_m, y_m) in points_map:
-        # print(f"Point: ({x_m:.2f}, {y_m:.2f}), Distance: {d} mm")
-        # if d >= 17000:
-        #     continue  # skip max range points
-
+        # Ray trace free space from drone to obstacle
         raytrace_free_space(x_d, y_d, x_m, y_m, grid)
+        
+        # Mark obstacle cell
         idx = map_to_grid(x_m, y_m)
         if idx is not None:
             gx, gy = idx
-            grid[gx, gy] = 1  # mark as occupied
+            grid[gx, gy] = GRID_OBSTACLE  # mark as obstacle
 
 
 
@@ -110,10 +120,11 @@ import numpy as np
 
 def inflate_obstacles(grid, inflation_radius_cells):
     """
-    Inflates obstacle cells by given radius (in grid cells)
+    Inflates obstacle cells by given radius (in grid cells).
+    Returns a copy of the grid with inflated obstacles.
     """
     inflated_grid = grid.copy()
-    obstacle_cells = np.argwhere(grid == 1)
+    obstacle_cells = np.argwhere(grid == GRID_OBSTACLE)
 
     for gx, gy in obstacle_cells:
         for dx in range(-inflation_radius_cells, inflation_radius_cells + 1):
@@ -123,7 +134,6 @@ def inflate_obstacles(grid, inflation_radius_cells):
                 ny = gy + dy
 
                 if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
-                    inflated_grid[nx, ny] = 1
+                    inflated_grid[nx, ny] = GRID_OBSTACLE
 
     return inflated_grid
-# Inflate obstacles

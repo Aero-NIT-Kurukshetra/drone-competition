@@ -48,15 +48,22 @@ latest_gps = {
 }
 
 # ---------------- REDIS LISTENERS ----------------
-@redis.listen("event:drone_gps_update")
+@redis.listen("mission_manager:drone_pose_update")
 async def handle_gps_update(data):
     """
-    Payload:
+    Payload from Mission Manager:
     {
+        "drone_id": str,
         "lat": float,
-        "lon": float
+        "lon": float,
+        "alt_m": float,
+        "timestamp": float
     }
     """
+    # Only track scout drone GPS for crop detection
+    if data.get("drone_id") != "scout":
+        return
+    
     latest_gps["lat"] = data.get("lat")
     latest_gps["lon"] = data.get("lon")
     logger.debug(f"[{WORKER_ID}] GPS updated: {latest_gps}")
@@ -168,15 +175,14 @@ async def camera_loop():
                     (lon, lat, crop_id)
                 )
 
+                # Publish crop detection event with flat lat/lon format
+                # Mission Manager expects: {"lat": float, "lon": float, "confidence": float}
                 event = {
-                    "event": "CROP_DETECTED",
-                    "crop_id": crop_id,
-                    "gps_position": {
-                        "lat": lat,
-                        "lon": lon
-                    },
+                    "lat": lat,
+                    "lon": lon,
                     "confidence": min(area / 2000.0, 1.0),
-                    "source": "scout",
+                    "crop_id": crop_id,
+                    "source": "scout_camera",
                     "timestamp": time.time()
                 }
 
@@ -185,11 +191,42 @@ async def camera_loop():
 
             # ---------------- SPRAYER MODE ----------------
             elif CAMERA_MODE == "sprayer":
-                # TODO:
-                # 1. Compute center offset for spray correction
-                # 2. Verify yellow reduction after spray
-                # 3. Publish event:spray_feedback / event:spray_completed
-                pass
+                # Compute center offset for spray correction
+                # The crop should be in the center of the frame for accurate spraying
+                
+                # Calculate offset from image center (in pixels)
+                offset_x = cx - w / 2  # positive = crop is to the right
+                offset_y = cy - h / 2  # positive = crop is below center
+                
+                # Convert pixel offset to meters
+                ground_w = 2 * ALTITUDE * math.tan(HFOV / 2)
+                ground_h = 2 * ALTITUDE * math.tan(VFOV / 2)
+                
+                offset_m_x = (offset_x / w) * ground_w
+                offset_m_y = (offset_y / h) * ground_h
+                
+                # Calculate distance from center
+                offset_distance = math.sqrt(offset_m_x**2 + offset_m_y**2)
+                
+                # Publish center correction feedback
+                # Mission Manager can use this to adjust sprayer position
+                await redis.publish("camera:sprayer_center_offset", {
+                    "offset_x_m": offset_m_x,
+                    "offset_y_m": offset_m_y,
+                    "offset_distance_m": offset_distance,
+                    "crop_area": area,
+                    "drone_lat": latest_gps["lat"],
+                    "drone_lon": latest_gps["lon"],
+                    "crop_lat": lat,
+                    "crop_lon": lon,
+                    "centered": offset_distance < 0.3,  # Within 30cm is considered centered
+                    "timestamp": time.time()
+                })
+                
+                if offset_distance < 0.3:
+                    logger.info(f"[{WORKER_ID}] Crop centered (offset: {offset_distance:.2f}m)")
+                else:
+                    logger.debug(f"[{WORKER_ID}] Crop offset: x={offset_m_x:.2f}m, y={offset_m_y:.2f}m")
 
         # await asyncio.sleep(0.05)  # ~20 FPS
 
