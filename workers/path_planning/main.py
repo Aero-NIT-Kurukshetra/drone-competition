@@ -169,6 +169,102 @@ async def handle_pathplanner_event(data: dict):
             }
         )
 
+@redis.listen("mission_manager:sprayer_plan_request")
+async def handle_sprayer_planning_request(data: dict):
+    """
+    Expected payload:
+    {
+        "drone_id": "sprayer",
+        "drone_pose": {
+            "lat": float,
+            "lon": float,
+            "alt": float
+        }
+    }
+    """
+    logger.info(f"[{WORKER_ID}] Sprayer planning request received")
+
+    drone_pose = data.get("drone_pose", {})
+    
+    # Get current crop index and increment
+    current_index_raw = await redis.client.get("path_planner:current_target_crop_index")
+    current_index = int(current_index_raw) if current_index_raw else -1
+    
+    next_index = current_index + 1
+    
+    # Fetch crop_locations array
+    crop_locations_raw = await redis.client.get("crop_locations")
+    
+    if not crop_locations_raw:
+        logger.warning(f"[{WORKER_ID}] No crop locations available")
+        await redis.publish(
+            "path_planning:planned_waypoint",
+            {"drone_id": "sprayer", "waypoint": None}
+        )
+        return
+    
+    crop_locations = json.loads(crop_locations_raw)
+    
+    # Check if there are more crops
+    if next_index >= len(crop_locations):
+        logger.info(f"[{WORKER_ID}] All crops processed ({len(crop_locations)} total)")
+        await redis.publish(
+            "path_planning:planned_waypoint",
+            {"drone_id": "sprayer", "waypoint": None}
+        )
+        return
+    
+    # Update index in Redis
+    await redis.client.set("path_planner:current_target_crop_index", str(next_index))
+    
+    # Get target crop location
+    target_crop = crop_locations[next_index]
+    
+    logger.info(
+        f"[{WORKER_ID}] Planning path to crop {next_index + 1}/{len(crop_locations)} "
+        f"at lat={target_crop['lat']}, lon={target_crop['lon']}"
+    )
+    
+    # TODO: Implement A* pathfinding here
+    # A* will use:
+    #   - drone_pose as START position
+    #   - target_crop as GOAL position  
+    #   - occupancy_grid to avoid obstacles
+    # Output: list of intermediate waypoints from start to goal
+    
+    sprayer_waypoints = []
+    
+    # For now, direct path to target (A* will add intermediate points)
+    # Target crop location
+    sprayer_waypoints.append({
+        "lat": target_crop["lat"],
+        "lon": target_crop["lon"],
+        "alt_m": target_crop.get("alt_m", target_crop.get("alt", 5.0))
+    })
+    
+    # Store waypoints in Redis
+    await redis.client.set(
+        "path_planner:sprayer_waypoints",
+        json.dumps({
+            "worker_id": WORKER_ID,
+            "waypoints": sprayer_waypoints,
+            "target_crop_index": next_index,
+            "timestamp": time.time()
+        })
+    )
+    
+    # Reset sprayer waypoint index to 0
+    await redis.client.set("path_planner:current_sprayer_waypoint_index", "0")
+    
+    logger.info(f"[{WORKER_ID}] Sprayer waypoints set: {len(sprayer_waypoints)} points")
+    
+    # Publish first waypoint to mission manager
+    await redis.publish(
+        "path_planning:planned_waypoint",
+        {"drone_id": "sprayer", "waypoint": sprayer_waypoints[0]}
+    )
+    
+
 def haversine_distance(lat1, lon1, lat2, lon2):
     # Earth radius in meters
     R = 6371000  
@@ -205,7 +301,7 @@ async def handle_request_next_waypoint(data):
 
     current_waypoint = int(await redis.client.get("path_planner:current_scout_waypoint_index"))
 
-    if current_waypoint >= len(current_scout_waypoints) - 1:
+    if current_waypoint >= len(current_scout_waypoints) - 1: 
         logger.info(f"[{WORKER_ID}] All waypoints completed for {drone_id}")
         await redis.publish(
             "path_planning:planned_waypoint",
