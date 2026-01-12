@@ -88,3 +88,37 @@ SPRAYER_SPRAY_DURATION = 20.0    # seconds - sprayer mechanism trigger duration 
 GRID_FREE = 0           # Explored and free to traverse
 GRID_OBSTACLE = 1       # Explored and blocked (obstacle)
 GRID_UNEXPLORED = 2     # Not yet explored by scout
+
+# ============================================
+# Farm Polygon Coordinates (from NIDAR.kml)
+# ============================================
+FARM_POLYGON = [
+    {"lon": 76.81589155096442, "lat": 29.94965311567124},
+    {"lon": 76.8162492257966,  "lat": 29.94939808518254},
+    {"lon": 76.81664355584154, "lat": 29.94963310749574},
+    {"lon": 76.81673785885653, "lat": 29.95054251583795},
+    {"lon": 76.81637533963627, "lat": 29.95078200571026},
+    {"lon": 76.81601151843628, "lat": 29.95060813092637},
+]
+
+def point_in_polygon(lat: float, lon: float, polygon: list = None) -> bool:
+    """
+    Ray-casting algorithm to check if a point is inside a polygon.
+    Uses FARM_POLYGON by default.
+    """
+    if polygon is None:
+        polygon = FARM_POLYGON
+    
+    n = len(polygon)
+    inside = False
+    
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]["lon"], polygon[i]["lat"]
+        xj, yj = polygon[j]["lon"], polygon[j]["lat"]
+        
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    
+    return inside

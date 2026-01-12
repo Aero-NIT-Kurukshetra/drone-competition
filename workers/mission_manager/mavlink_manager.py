@@ -5,7 +5,7 @@ import time
 import logging
 from pymavlink import mavutil
 from common.redis_client import RedisClient
-from workers.SETTINGS import MAVLINK_MAX_PER_TICK, MAVLINK_MAX_LATENCY_S
+from workers.SETTINGS import MAVLINK_MAX_PER_TICK, MAVLINK_MAX_LATENCY_S, point_in_polygon
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,22 @@ class MAVLinkManager:
         logger.info("[MAVLink] Connected to sprayer")
         
         self.drones = [self.scout, self.sprayer]
+
+        # Track drone state for validation
+        self._drone_state = {
+            "scout": {
+                "landed_state": 0,  # 0=UNDEFINED, 1=ON_GROUND, 2=IN_AIR
+                "lat": None,
+                "lon": None,
+                "alt_m": None,
+            },
+            "sprayer": {
+                "landed_state": 0,
+                "lat": None,
+                "lon": None,
+                "alt_m": None,
+            },
+        }
 
         # subscribe to all MAVLink messages
         for drone in self.drones:
@@ -105,10 +121,9 @@ class MAVLinkManager:
             )
         elif t == "STATUSTEXT":
             self.loop.create_task(
-            self._handle_statustext(msg, drone_id)
-        )
+                self._handle_statustext(msg, drone_id)
+            )
         elif t == "OBSTACLE_DISTANCE":
-            print("hi")
             self.loop.create_task(
                 self._handle_obstacle_distance(msg)
             )
@@ -175,15 +190,100 @@ class MAVLinkManager:
         }
 
         await self.redis.publish("mission_manager:drone_heartbeat", payload)
+
     async def _handle_statustext(self, msg, drone_id):
+        """
+        Handle STATUSTEXT messages from drones.
+        
+        Crop detection format from scout pcam.py:
+        "2,<lat_int>,<lon_int>,<confidence>"
+        where event_id 2 = CROP_DETECTED
+        
+        Sprayer finished format from sprayer_cam.py:
+        "1,<result>,<spray_time_ms>,0"
+        where event_id 1 = SPRAYER_FINISHED
+        """
+        text = msg.text.strip()
+        logger.debug(f"[MAVLink] STATUSTEXT from {drone_id}: {text}")
+
+        # Try to parse as event message (comma-separated format)
+        parts = text.split(",")
+        if len(parts) >= 4:
+            try:
+                event_id = int(parts[0])
+                
+                if event_id == 2:  # CROP_DETECTED from scout
+                    lat = int(parts[1]) / 1e7
+                    lon = int(parts[2]) / 1e7
+                    confidence = float(parts[3])
+                    
+                    # Validate: drone must be in air
+                    drone_state = self._drone_state.get(drone_id, {})
+                    landed_state = drone_state.get("landed_state", 0)
+                    
+                    # if landed_state != 2:  # Not IN_AIR
+                    #     logger.warning(
+                    #         f"[MAVLink] Ignoring crop detection from {drone_id}: "
+                    #         f"drone not in air (landed_state={landed_state})"
+                    #     )
+                    #     return
+                    
+                    # Validate: crop must be inside farm polygon
+                    if not point_in_polygon(lat, lon):
+                        logger.warning(
+                            f"[MAVLink] Ignoring crop detection from {drone_id}: "
+                            f"location outside farm bounds (lat={lat:.6f}, lon={lon:.6f})"
+                        )
+                        return
+                    
+                    # Valid crop detection - publish to Redis
+                    payload = {
+                        "drone_id": drone_id,
+                        "lat": lat,
+                        "lon": lon,
+                        "confidence": confidence,
+                        "timestamp": time.time()
+                    }
+                    
+                    logger.info(
+                        f"[MAVLink] Valid crop detected by {drone_id}: "
+                        f"lat={lat:.6f}, lon={lon:.6f}, confidence={confidence:.2f}"
+                    )
+                    
+                    await self.redis.publish("mission_manager:drone_crop_detected", payload)
+                    return
+                
+                elif event_id == 1:  # SPRAYER_FINISHED from sprayer
+                    result = int(parts[1])
+                    spray_time_ms = int(parts[2])
+                    
+                    payload = {
+                        "drone_id": drone_id,
+                        "result": result,
+                        "spray_time_ms": spray_time_ms,
+                        "timestamp": time.time()
+                    }
+                    
+                    logger.info(
+                        f"[MAVLink] Sprayer finished: result={result}, "
+                        f"spray_time={spray_time_ms}ms"
+                    )
+                    
+                    await self.redis.publish("mission_manager:drone_sprayer_finished", payload)
+                    return
+                    
+            except (ValueError, IndexError) as e:
+                logger.debug(f"[MAVLink] Could not parse as event: {e}")
+        
+        # Fallback: publish as general status text
         payload = {
             "drone_id": drone_id,
             "severity": msg.severity,
-            "text": msg.text.decode('utf-8', errors='ignore').strip('\x00'),
+            "text": text,
             "timestamp": time.time()
         }
+        await self.redis.publish("mission_manager:drone_statustext", payload)
 
-        await self.redis.publish("mission_manager:drone_leaf_dectection", payload)
     async def _handle_crop_detected(self, msg, drone_id):
         payload = {
             "drone_id": drone_id,
@@ -214,6 +314,9 @@ class MAVLinkManager:
             3: TAKEOFF
             4: LANDING
         """
+        # Update internal state tracking
+        if drone_id in self._drone_state:
+            self._drone_state[drone_id]["landed_state"] = msg.landed_state
 
         payload = {
             "drone_id": drone_id,
@@ -224,12 +327,21 @@ class MAVLinkManager:
         await self.redis.publish("mission_manager:drone_extended_sys_state", payload)
 
     async def _handle_global_position(self, msg, drone_id):
+        lat = msg.lat / 1e7
+        lon = msg.lon / 1e7
+        alt_m = msg.alt / 1000.0
+        
+        # Update internal state tracking
+        if drone_id in self._drone_state:
+            self._drone_state[drone_id]["lat"] = lat
+            self._drone_state[drone_id]["lon"] = lon
+            self._drone_state[drone_id]["alt_m"] = alt_m
+        
         payload = {
             "drone_id": drone_id,
-            # "position": [msg.x, msg.y, msg.z],
-            "lat": msg.lat / 1e7,
-            "lon": msg.lon / 1e7,
-            "alt_m": msg.alt / 1000.0,
+            "lat": lat,
+            "lon": lon,
+            "alt_m": alt_m,
             "timestamp": time.time()
         }
 
@@ -430,7 +542,7 @@ class MAVLinkManager:
 
         if drone_id == "scout":
             # if sprayer mission_state is idle, command sprayer to RTL as well
-            sprayer_state = json.loads(await self.redis.get("mission:state"))["sprayer"]
+            sprayer_state = json.loads(await self.redis.client.get("mission:state"))["sprayer"]
             if sprayer_state.lower() == "idle":
                 sprayer_mode_id = self.sprayer.mode_mapping().get("RTL", 6)
                 self.sprayer.mav.set_mode_send(
@@ -485,6 +597,31 @@ class MAVLinkManager:
             0, 0, 0,                              # acceleration ignored
             0, 0                                 # yaw ignored
         )
+
+    def send_spray_command(self, crop_lat: float, crop_lon: float):
+        """
+        Send spray command to sprayer Raspberry Pi via STATUSTEXT.
+        
+        Format: "0,<lat_int>,<lon_int>,0"
+        Event ID 0 = SPRAY_COMMAND (tells Pi to start spray procedure)
+        
+        The Pi (sprayer_cam.py) will:
+        1. Center over crop using HSV camera
+        2. Descend to spray altitude
+        3. Trigger spray relay
+        4. Ascend back to cruise altitude
+        5. Send SPRAYER_FINISHED (event ID 1) back
+        """
+        # Format: event_id,lat_int,lon_int,reserved
+        EVENT_SPRAY_COMMAND = 0
+        msg = f"{EVENT_SPRAY_COMMAND},{int(crop_lat * 1e7)},{int(crop_lon * 1e7)},0"
+        
+        self.sprayer.mav.statustext_send(
+            mavutil.mavlink.MAV_SEVERITY_INFO,
+            msg.encode()
+        )
+        
+        logger.info(f"[MAVLink] Sent SPRAY_COMMAND to sprayer Pi: lat={crop_lat:.6f}, lon={crop_lon:.6f}")
 
     def halt(self, drone_id):
         link = self.scout if drone_id == "scout" else self.sprayer

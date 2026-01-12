@@ -244,7 +244,13 @@ async def handle_extended_sys_state(data):
 
 @redis.listen("mission_manager:drone_sprayer_finished")
 async def handle_sprayer_finished(data):
-    """Handle SPRAYER_FINISHED MAVLink message.
+    """Handle SPRAYER_FINISHED MAVLink message from sprayer Raspberry Pi.
+    
+    This is sent by sprayer_cam.py after completing:
+    1. Centering over crop
+    2. Descending to spray altitude
+    3. Triggering spray relay
+    4. Ascending back to cruise altitude
     
     Payload:
     {
@@ -256,26 +262,22 @@ async def handle_sprayer_finished(data):
     """
     drone_id = data["drone_id"]
     spray_time_ms = data.get("spray_time_ms", 0)
+    result = data.get("result", 0)
     
-    logger.info(f"[MissionManager] Sprayer finished spraying (duration: {spray_time_ms}ms)")
+    logger.info(f"[MissionManager] Sprayer Pi finished spray procedure (result={result}, duration={spray_time_ms}ms)")
     
     drone = mission_state["drones"][drone_id]
     
-    if drone["mode"] == "SPRAYING":
-        # Spraying complete, now ascend back to cruise altitude
-        logger.info("[MissionManager] Spraying finished → ascending")
+    if drone["mode"] == "WAITING_FOR_SPRAY_COMPLETION":
+        # Pi has completed the entire spray procedure (center, descend, spray, ascend)
+        logger.info("[MissionManager] Spray procedure complete → processing next crop")
         
-        drone["mode"] = "ASCENDING_AFTER_SPRAY"
-        await sync_state_to_redis()
+        clear_active_waypoint("sprayer")
         
-        wp = drone["active_waypoint"]
-        if wp:
-            mav.send_waypoint_latlon(
-                "sprayer",
-                wp["lat"],
-                wp["lon"],
-                SPRAYER_CRUISE_ALT
-            )
+        # Handle crop completion (checks for more crops in queue)
+        await on_sprayer_crop_completed()
+    else:
+        logger.warning(f"[MissionManager] Received SPRAYER_FINISHED but mode is {drone['mode']}, ignoring")
 
 @redis.listen("event:no_safe_path")
 async def handle_no_safe_path(data):
@@ -491,10 +493,7 @@ async def handle_pose_update(data):
         "NAVIGATING_TO_WAYPOINT", 
         "WAITING_FOR_NEXT_WAYPOINT", 
         "TAKING_OFF",
-        "HOVERING_FOR_CORRECTION",
-        "DESCENDING_TO_SPRAY",
-        "SPRAYING",
-        "ASCENDING_AFTER_SPRAY"
+        "WAITING_FOR_SPRAY_COMPLETION",  # Pi handles spray procedure
     ]
 
     if drone["halted"] or drone["mode"] not in ACTIVE_MODES:
@@ -594,92 +593,29 @@ async def handle_pose_update(data):
         logger.debug(f"[MissionManager] sprayer spray-state-check: mode={drone['mode']}, dist={distance:.2f}m, alt={cur_alt:.1f}m, is_last_wp={is_last_waypoint}")
 
         # ──────────────────────────────
-        # 2. Crop waypoint reached → hover for center correction
+        # 2. Crop waypoint reached → send spray command to Raspberry Pi
         # ──────────────────────────────
         if drone["mode"] == "NAVIGATING_TO_WAYPOINT" and distance < SPRAYER_CROP_RADIUS:
-            logger.info(f"[MissionManager] sprayer reached crop (dist={distance:.2f}m < {SPRAYER_CROP_RADIUS}m) → hovering for center correction")
+            logger.info(f"[MissionManager] sprayer reached crop (dist={distance:.2f}m < {SPRAYER_CROP_RADIUS}m)")
+            logger.info("[MissionManager] Sending SPRAY_COMMAND to sprayer Raspberry Pi...")
 
-            drone["mode"] = "HOVERING_FOR_CORRECTION"
-            drone["hover_start_ts"] = time.time()
-            await sync_state_to_redis()
-
-            # Halt drone to hover in place for stabilization
+            # Halt drone - Pi will take over positioning
             mav.halt("sprayer")
-            return
-
-        # ──────────────────────────────
-        # 3. After hovering → descend to spray altitude
-        # ──────────────────────────────
-        if drone["mode"] == "HOVERING_FOR_CORRECTION":
-            hover_elapsed = time.time() - drone.get("hover_start_ts", 0)
             
-            if hover_elapsed >= SPRAYER_HOVER_TIME:
-                logger.info(f"[MissionManager] center correction complete ({SPRAYER_HOVER_TIME}s) → descending to {SPRAYER_SPRAY_ALT}m")
-
-                drone["mode"] = "DESCENDING_TO_SPRAY"
-                await sync_state_to_redis()
-
-                mav.send_waypoint_latlon(
-                    "sprayer",
-                    wp["lat"],
-                    wp["lon"],
-                    SPRAYER_SPRAY_ALT
-                )
-            return
-
-        # ──────────────────────────────
-        # 4. At spray altitude → start spraying
-        # ──────────────────────────────
-        if drone["mode"] == "DESCENDING_TO_SPRAY":
-            logger.debug(f"[MissionManager] descending check: cur_alt={cur_alt:.1f}m, target={SPRAYER_SPRAY_ALT}m, diff={abs(cur_alt - SPRAYER_SPRAY_ALT):.2f}m")
-            if abs(cur_alt - SPRAYER_SPRAY_ALT) < 0.5:  # Increased tolerance
-                logger.info(f"[MissionManager] sprayer at spray altitude ({cur_alt:.1f}m) → START_SPRAYING")
-
-                drone["mode"] = "SPRAYING"
-                drone["spray_start_ts"] = time.time()
-                await sync_state_to_redis()
-
-                # Send custom MAVLink command to start spraying
-                mav.sprayer.mav.command_long_send(
-                    mav.sprayer.target_system,
-                    mav.sprayer.target_component,
-                    mavutil.mavlink.MAV_CMD_USER_1,  # START_SPRAYING
-                    0, 0, 0, 0, 0, 0, 0, 0
-                )
-            return
-
-        # ──────────────────────────────
-        # 5. Spraying → wait for completion (timeout or MAVLink callback)
-        # ──────────────────────────────
-        if drone["mode"] == "SPRAYING":
-            spray_elapsed = time.time() - drone.get("spray_start_ts", 0)
+            # Send spray command to Pi via STATUSTEXT
+            # Pi will handle: centering, descending, spraying, ascending
+            mav.send_spray_command(wp["lat"], wp["lon"])
             
-            # Timeout fallback if SPRAYER_FINISHED not received
-            if spray_elapsed >= SPRAYER_SPRAY_DURATION:
-                logger.info(f"[MissionManager] spray complete ({spray_elapsed:.1f}s) → ascending to {SPRAYER_CRUISE_ALT}m")
-
-                drone["mode"] = "ASCENDING_AFTER_SPRAY"
-                await sync_state_to_redis()
-
-                mav.send_waypoint_latlon(
-                    "sprayer",
-                    wp["lat"],
-                    wp["lon"],
-                    SPRAYER_CRUISE_ALT
-                )
+            # Set mode to wait for Pi to complete spray procedure
+            drone["mode"] = "WAITING_FOR_SPRAY_COMPLETION"
+            await sync_state_to_redis()
             return
 
         # ──────────────────────────────
-        # 6. Ascending after spray → back to cruise altitude
+        # 3. Waiting for spray completion from Pi
         # ──────────────────────────────
-        if drone["mode"] == "ASCENDING_AFTER_SPRAY":
-            logger.debug(f"[MissionManager] ascending check: cur_alt={cur_alt:.1f}m, target={SPRAYER_CRUISE_ALT}m")
-            if abs(cur_alt - SPRAYER_CRUISE_ALT) < 0.3:
-                logger.info("[MissionManager] sprayer back at cruise altitude → crop completed")
-                clear_active_waypoint("sprayer")
-                
-                # Handle crop completion (increments index, checks for more)
-                await on_sprayer_crop_completed()
+        # The SPRAYER_FINISHED event from Pi is handled by handle_sprayer_finished()
+        # which will trigger on_sprayer_crop_completed()
 
 @redis.listen("system_mode")
 async def handle_system_mode(mode):
