@@ -11,20 +11,23 @@ from test_scripts.lidar_test.streamer import runner as lidar_streamer   # stream
 from test_scripts.lidar_test.receiver import runner as lidar_receiver   # plots data received from mavlink
 from test_scripts.path_planning_test.mock_start_mission import runner as kml_streamer  # streams kml data to path planner
 # from test_scripts.mission_manager.state_listener import runner as mm_state_listener  # listens to mission manager state updates
-
+# from test_scripts.misc_test.custom_message import runner as custom_message_runner  # sends custom mavlink messages
+# from test_scripts.misc_test.custom_receiver import runner as custom_receiver_runner  # receives custom mavlink messages
 
 links = {
 	# workers
 	"mission_manager": mm_runner,
 	"lidar_processing": lp_runner,
 	"path_planner": pp_runner,
-	"camera_processing": cp_runner,
+	# "camera_processing": cp_runner,
 
 	# tests
 	"lidar_streamer": lidar_streamer,
 	"lidar_receiver": lidar_receiver,
 	"kml_streamer": kml_streamer,
-	# "mm_state_listener": mm_state_listener
+	# "mm_state_listener": mm_state_listener,
+	# "custom_message": custom_message_runner,
+	# "custom_receiver": custom_receiver_runner,
 }
 
 if __name__ == "__main__":

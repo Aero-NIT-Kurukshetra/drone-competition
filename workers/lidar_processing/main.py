@@ -26,6 +26,8 @@ from workers.SETTINGS import (
     DIST_MAX_MM,
     PLOT_INTERVAL,
     INFLATION_RADIUS_CELLS,
+    LAT0,
+    LON0,
 )
 
 MAX_LIMIT=3
@@ -76,8 +78,7 @@ redis = RedisClient(loop=loop, worker_id=WORKER_ID)
 GRID_SIZE = LIDAR_GRID_SIZE
 GRID_RESOLUTION = LIDAR_GRID_RESOLUTION
 
-# Global state
-occupancy_grid = create_occupancy_grid()
+# Global state (used only as fallback - prefer Redis grid)
 drone_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
 time_boot_us = 0
 
@@ -119,57 +120,42 @@ time_boot_us = 0
 
 
 
-def update_grid(x_d: float, y_d: float, yaw_deg: float,
-                distances_cm: list[int],
-                angle_offset_deg: float,
-                angle_inc_deg: float):
-    global occupancy_grid, last_plot_time
-
-    # Initialize here if running standalone and not via runner (though runner is preferred)
-    # or just return if not initialized
+async def update_grid_async(x_d: float, y_d: float, yaw_deg: float,
+                           distances_cm: list[int],
+                           angle_offset_deg: float,
+                           angle_inc_deg: float):
+    """
+    Update the occupancy grid with LiDAR scan data.
+    Loads grid from Redis, updates it, and saves back.
+    """
+    # Load occupancy grid from Redis
+    grid_raw = await redis.binary_client.get("occupancy_grid")
+    
+    if not grid_raw:
+        logger.warning(f"[{WORKER_ID}] No occupancy grid in Redis, creating new one")
+        occupancy_grid = create_occupancy_grid()
+    else:
+        occupancy_grid = np.frombuffer(grid_raw, dtype=np.uint8).reshape(
+            (LIDAR_GRID_SIZE, LIDAR_GRID_SIZE)
+        ).copy()  # Copy to make it writable
 
     distances_cm = np.array(distances_cm, dtype=np.float32)
     
-    
-    scan=[
+    scan = [
         (d, angle_offset_deg + i * angle_inc_deg)
         for i, d in enumerate(distances_cm)
     ]
-    # print(scan)
-    # print("angle increment:",angle_inc_deg," angle offset:",angle_offset_deg)
    
-    point_locals=range_filter(scan,min_range=DIST_MIN_MM,max_range=DIST_MAX_MM)
-
-    # for point in point_locals:
-    #     print(f"Point before filtering: {point}")
-    # print(f"LiDAR points after range filter: {len(point_locals)}")
-
-    points_map=[lidar_to_map(x,y,x_d,y_d,yaw_deg) for (x,y) in point_locals]
-
-
-    # plot_scan(points_map)
-    # print(f"Updating occupancy grid with {len(points_map)} points")
+    point_locals = range_filter(scan, min_range=DIST_MIN_MM, max_range=DIST_MAX_MM)
+    points_map = [lidar_to_map(x, y, x_d, y_d, yaw_deg) for (x, y) in point_locals]
     
-    update_grid_from_scan(points_map, occupancy_grid, (x_d, y_d, yaw_deg))
-    
-    inflated_grid = inflate_obstacles(occupancy_grid, INFLATION_RADIUS_CELLS)
-
-    # Update plot only if interval has passed and plots are initialized
-    # if fig is not None and (time.time() - last_plot_time > PLOT_INTERVAL):
-    #     INFLATION_RADIUS_CELLS = 1
-    #     inflated_grid = inflate_obstacles(occupancy_grid, INFLATION_RADIUS_CELLS)
+    if len(points_map) > 0:
+        update_grid_from_scan(points_map, occupancy_grid, (x_d, y_d, yaw_deg))
         
-    #     # img.set_data(occupancy_grid.T)
-    #     # img.set_clim(vmin=0, vmax=2)
-    #     # gx,gy=map_to_grid(x_d,y_d)
-    #     # robot_dot.set_offsets((gx, gy)) 
-
-    #     # img_inflated.set_data(inflated_grid.T)
-    #     # img_inflated.set_clim(vmin=0, vmax=2)
-    #     # robot_dot_inflated.set_offsets((gx, gy))
+        # Save updated grid back to Redis
+        await redis.binary_client.set("occupancy_grid", occupancy_grid.tobytes())
         
-    #     plt.pause(0.02)
-    #     last_plot_time = time.time()
+        logger.debug(f"[{WORKER_ID}] Grid updated with {len(points_map)} LiDAR points")
 
 
 
@@ -181,17 +167,41 @@ def update_grid(x_d: float, y_d: float, yaw_deg: float,
 
 async def publish_grid():
     """Publish occupancy grid to Redis and emit update event"""
-    await redis.client.set("occupancy_grid", occupancy_grid.tobytes())
+    await redis.binary_client.set("occupancy_grid", occupancy_grid.tobytes())
     await redis.publish("lidar_processing:occupancy_grid_updated", {"status": "updated", "timestamp": time.time()})
     logger.info(f"[{WORKER_ID}] Occupancy grid published")
 
 @redis.listen("mission_manager:drone_pose_update")
 async def handle_drone_pose_update(data):
-    """Update drone pose from Mission Manager"""
+    """Update drone pose from Mission Manager.
+    
+    Payload:
+    {
+        "drone_id": str,
+        "lat": float,
+        "lon": float,
+        "alt_m": float,
+        "timestamp": float
+    }
+    """
     global drone_pose
-    drone_pose["x"] = data.get("position", [0, 0, 0])[0]
-    drone_pose["y"] = data.get("position", [0, 0, 0])[1]
-    logger.debug(f"[{WORKER_ID}] Pose updated: {drone_pose}")
+    
+    # Only track scout drone for LiDAR mapping
+    if data.get("drone_id") != "scout":
+        return
+    
+    lat = data.get("lat")
+    lon = data.get("lon")
+    
+    if lat is None or lon is None:
+        return
+    
+    # Convert GPS to local ENU coordinates (meters)
+    x, y = gps_to_local(lat, lon, LAT0, LON0)
+    
+    drone_pose["x"] = x
+    drone_pose["y"] = y
+    logger.debug(f"[{WORKER_ID}] Pose updated: x={x:.2f}m, y={y:.2f}m")
 
 @redis.listen("mission_manager:drone_attitude_update")
 async def handle_drone_yaw_update(data):
@@ -212,9 +222,11 @@ async def handle_obstacle_distance(data):
     distances = data.get("distances", [])
     angle_offset = data.get("angle_offset", 0)
     angle_inc = data.get("increment_f", 5)
-    # print(" Angle offset:",angle_offset," Angle increment:",angle_inc,"drone pose:",drone_pose)
-    update_grid(drone_pose["x"], drone_pose["y"], drone_pose["yaw"],
-                distances, angle_offset, angle_inc)
+    
+    await update_grid_async(
+        drone_pose["x"], drone_pose["y"], drone_pose["yaw"],
+        distances, angle_offset, angle_inc
+    )
     await publish_grid()
 
 

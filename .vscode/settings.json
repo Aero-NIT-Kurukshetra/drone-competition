@@ -1,0 +1,51 @@
+{
+	"actionButtons": {
+		"commands": [
+			{
+				"name": "Scout SITL",
+				"command": "arducopter.exe --model quad --defaults default_params/scout.parm --serial0 udpclient:127.0.0.1:14550 --serial1 udpclient:127.0.0.1:13550 --serial2 udpclient:127.0.0.1:13551 --home 29.949423,76.815850,0,0",
+				"color": "lightblue",
+				"focus": true
+			},
+			{
+				"name": "Sprayer SITL",
+				"command": "arducopter.exe --model quad --defaults default_params/sprayer.parm --serial0 udpclient:127.0.0.1:14551 --serial1 udpclient:127.0.0.1:13560 --serial2 udpclient:127.0.0.1:13561 --home 29.9494244,76.8157411,0,0",
+				"color": "lightgreen",
+				"focus": true
+			},
+			{
+				"name": "State Listener",
+				"command": "python launcher.py mm_state_listener",
+				"focus": true
+			},
+			{
+				"name": "Start mission",
+				"command": "python launcher.py kml_streamer",
+				"focus": true
+			},
+			{
+				"name": "Mission Manager",
+				"command": "python launcher.py mission_manager",
+				"focus": true
+			},
+			{
+				"name": "Lidar Worker",
+				"command": "python launcher.py lidar_processing",
+				"focus": true
+			},
+			{
+				"name": "Path Planner",
+				"command": "python launcher.py path_planner",
+				"focus": true
+			},
+			{
+				"name": "RPI Mock",
+				"command": "python tests/LIDAR-test/streamer.py",
+				"focus": true
+			}
+		],
+		"defaultColor": "white",
+		"reloadButton": "↻",
+		"loadNpmCommands": false
+	}
+}

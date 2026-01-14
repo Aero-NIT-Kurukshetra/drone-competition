@@ -7,8 +7,20 @@ def heuristic(a, b):
 
 def astar(grid, start, goal):
     """
-    grid: inflated occupancy grid
-    start, goal: (gx, gy)
+    A* pathfinding on occupancy grid.
+    
+    Grid cell values:
+        0 = explored, free (traversable)
+        1 = explored, obstacle (blocked)
+        2 = unexplored (blocked - sprayer must wait for scout)
+    
+    Args:
+        grid: occupancy grid (numpy array) - indexed as grid[row, col] = grid[gy, gx]
+        start: (gx, gy) start cell
+        goal: (gx, gy) goal cell
+    
+    Returns:
+        List of (gx, gy) tuples representing path, or None if no path found
     """
     rows, cols = grid.shape
 
@@ -28,12 +40,15 @@ def astar(grid, start, goal):
                        (-1,-1),(-1,1),(1,-1),(1,1)]:
 
             neighbor = (current[0] + dx, current[1] + dy)
+            ngx, ngy = neighbor
 
-            if not (0 <= neighbor[0] < rows and 0 <= neighbor[1] < cols):
+            # Check bounds: rows = GRID_SIZE (y), cols = GRID_SIZE (x)
+            if not (0 <= ngx < cols and 0 <= ngy < rows):
                 continue
 
-            # ❌ blocked cell
-            if grid[neighbor[0], neighbor[1]] == 1:
+            # Grid is indexed as grid[row, col] = grid[gy, gx]
+            cell_value = grid[ngy, ngx]
+            if cell_value != 0:  # Only traverse explored free cells (value=0)
                 continue
 
             tentative_g = g_score[current] + heuristic(current, neighbor)

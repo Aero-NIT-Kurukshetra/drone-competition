@@ -2,7 +2,6 @@ terrain/*
 *.bat
 __pycache__/
 *.pyc
-.vscode/
 .env
 *.kml
 *.csv

@@ -20,18 +20,13 @@ ALTITUDE_M = 5.0
 HFOV_DEG = 62.2
 VFOV_DEG = 48.8
 
-PIXHAWK_UDP = "udpin:localhost:14540"
+DRONE_INTERFACE = "/dev/ttyACM0" # "udpin:localhost:13561"
 
-# ============================
-# MAVLINK CONNECTION
-# ============================
-pixhawk = mavutil.mavlink_connection(PIXHAWK_UDP)
+pixhawk = mavutil.mavlink_connection(DRONE_INTERFACE, baud = 57600)
+print("Waiting for heartbeat...")
 pixhawk.wait_heartbeat()
 print("Connected to Pixhawk")
 
-# ============================
-# SHARED GPS STATE (THREAD SAFE)
-# ============================
 gps_lock = threading.Lock()
 latest_gps = {
     "lat": None,
@@ -65,9 +60,6 @@ def get_latest_gps():
     with gps_lock:
         return latest_gps["lat"], latest_gps["lon"]
 
-# ============================
-# UTILS
-# ============================
 recent_crops = []
 
 def pixel_to_ground_offset(cx, cy):
@@ -114,14 +106,10 @@ def centroid(contour):
         return -1, -1
     return int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
 
-# ============================
-# CAMERA
-# ============================
 cap = cv2.VideoCapture(0)
 
-# ============================
-# MAIN LOOP
-# ============================
+length = 0
+
 while True:
     loop_start = time.time()
 
@@ -138,6 +126,7 @@ while True:
         cv2.CHAIN_APPROX_SIMPLE
     )
 
+    print(f"Detected {len(contours)} contours")
 
     if contours:
         c = max(contours, key=cv2.contourArea)
@@ -159,7 +148,7 @@ while True:
             if not is_duplicate_crop(crop_lat, crop_lon):
                 ts = time.time()
                 confidence = min(1.0, area / 5000.0)
-                crop_id = f"crop_{int(ts * 1000)}"
+                crop_detected_event = 2
 
                 recent_crops.append({
                     "lat": crop_lat,
@@ -167,8 +156,7 @@ while True:
                 })
 
                 mav_msg = (
-                    f"{crop_id},{crop_lat:.7f},{crop_lon:.7f},"
-                    f"{confidence:.2f},{int(ts * 1000)}"
+                    f"{crop_detected_event},{int(crop_lat * 1e7)},{int(crop_lon * 1e7)},{confidence:.2f}"
                 )
 
                 pixhawk.mav.statustext_send(
