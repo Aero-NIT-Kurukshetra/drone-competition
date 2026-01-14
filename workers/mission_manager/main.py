@@ -517,9 +517,9 @@ async def main():
 
     tasks = [
         loop.create_task(heartbeat_loop()),
-        # loop.create_task(mav.listen()),
-        loop.create_task(mav.poll(mav.scout, "scout")),
-        loop.create_task(mav.poll(mav.sprayer, "sprayer")),
+        loop.create_task(mav.poll()),
+        # loop.create_task(mav.poll(mav.scout, "scout")),
+        # loop.create_task(mav.poll(mav.sprayer, "sprayer")),
     ]
 
     await shutdown_event.wait()
