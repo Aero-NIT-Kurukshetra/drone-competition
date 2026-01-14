@@ -67,8 +67,8 @@ HFOV_DEG = 62.2
 VFOV_DEG = 48.8
 
 # MAVLink connection
-DRONE_INTERFACE = "/dev/ttyACM0"  # Or UDP link like "udp:localhost:14550"
 BAUD_RATE = 57600
+DRONE_INTERFACE = {"device": "udp:localhost:13551"} if not RUNNING_ON_PI else {"device": "/dev/ttyACM0", "baud": BAUD_RATE} 
 
 # Event IDs
 EVENT_CROP_DETECTED = 2
@@ -80,7 +80,7 @@ DETECTION_COOLDOWN_S = 0.5     # Minimum time between detections
 # MAVLINK CONNECTION
 # ============================
 logger.info("Connecting to Pixhawk...")
-pixhawk = mavutil.mavlink_connection(DRONE_INTERFACE, baud=BAUD_RATE)
+pixhawk = mavutil.mavlink_connection(**DRONE_INTERFACE)
 logger.info("Waiting for heartbeat...")
 pixhawk.wait_heartbeat()
 logger.info(f"Connected to Pixhawk (system {pixhawk.target_system})")
@@ -170,6 +170,7 @@ def capture_frame():
         return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
     elif cap is not None:
         ret, frame = cap.read()
+        frame = cv2.flip(frame, 1)  # Mirror for webcam
         return frame if ret else None
     else:
         return None
@@ -212,6 +213,95 @@ def is_duplicate_crop(lat, lon):
             return True
     return False
 
+def draw_detection_overlay(frame, contours, largest_contour=None, crop_center=None, info_text=None):
+    """
+    Draw detection visualization on frame for simulation mode.
+    Shows contours, area values, and detection information.
+    """
+    vis_frame = frame.copy()
+    
+    # Draw all contours with their areas
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        
+        # Highlight the largest contour differently
+        is_largest = (largest_contour is not None and 
+                     cv2.contourArea(contour) == cv2.contourArea(largest_contour))
+        
+        color = (0, 255, 0) if is_largest else (100, 150, 100)
+        thickness = 3 if is_largest else 1
+        
+        if area >= AREA_THRESHOLD:
+            # Draw contour
+            cv2.drawContours(vis_frame, [contour], -1, color, thickness)
+            
+            # Get bounding box for area label placement
+            x, y, w, h = cv2.boundingRect(contour)
+            cv2.rectangle(vis_frame, (x, y), (x + w, y + h), (255, 0, 0), 1)
+            
+            # Draw area value
+            cv2.putText(
+                vis_frame,
+                f"Area: {int(area)}",
+                (x, y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                1
+            )
+    
+    # Draw crop center if detected
+    if crop_center is not None:
+        cx, cy = crop_center
+        cv2.circle(vis_frame, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.drawMarker(
+            vis_frame,
+            (cx, cy),
+            (0, 0, 255),
+            cv2.MARKER_CROSS,
+            20,
+            2
+        )
+        cv2.putText(
+            vis_frame,
+            f"Crop: ({cx}, {cy})",
+            (cx + 15, cy - 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            2
+        )
+    
+    # Draw frame center
+    frame_cx = FRAME_W // 2
+    frame_cy = FRAME_H // 2
+    cv2.circle(vis_frame, (frame_cx, frame_cy), 3, (255, 255, 0), -1)
+    cv2.drawMarker(
+        vis_frame,
+        (frame_cx, frame_cy),
+        (255, 255, 0),
+        cv2.MARKER_CROSS,
+        15,
+        1
+    )
+    
+    # Add info text overlay
+    if info_text:
+        y_offset = 30
+        for line in info_text:
+            cv2.putText(
+                vis_frame,
+                line,
+                (10, y_offset),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2
+            )
+            y_offset += 25
+    
+    return vis_frame
+
 def yellow_mask(frame_bgr):
     """Create a mask for yellow-colored crops."""
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -231,6 +321,13 @@ def main():
     logger.info("Detecting yellow crops and streaming to GCS...")
     logger.info("=" * 50)
     
+    # Create window for visualization in simulation mode
+    if not RUNNING_ON_PI:
+        cv2.namedWindow("Scout Camera - Crop Detection", cv2.WINDOW_NORMAL)
+        logger.info("Visualization window opened for simulation mode")
+    
+    detection_count = 0
+    
     try:
         while True:
             loop_start = time.time()
@@ -249,10 +346,44 @@ def main():
                 cv2.CHAIN_APPROX_SIMPLE
             )
 
+            # Prepare visualization data
+            largest_contour = None
+            crop_center = None
+            info_text = []
+            
+            if contours:
+                # Find largest contour
+                c = max(contours, key=cv2.contourArea)
+                area = cv2.contourArea(c)
+                largest_contour = c
+                
+                if area > AREA_THRESHOLD:
+                    # Get bounding box center
+                    x, y, w, h = cv2.boundingRect(c)
+                    cx = x + w // 2
+                    cy = y + h // 2
+                    crop_center = (cx, cy)
+                    
+                    # Prepare info text
+                    info_text.append(f"Detections: {detection_count}")
+                    info_text.append(f"Largest Area: {int(area)} px")
+                    info_text.append(f"Contours: {len(contours)}")
+            
+            # Display visualization in simulation mode
+            if not RUNNING_ON_PI:
+                vis_frame = draw_detection_overlay(frame, contours, largest_contour, crop_center, info_text)
+                cv2.imshow("Scout Camera - Crop Detection", vis_frame)
+                
+                # Handle key press (ESC to exit)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:  # ESC key
+                    logger.info("ESC pressed, exiting...")
+                    break
+            
             if not contours:
                 continue
 
-            # Find largest contour
+            # Find largest contour (again for processing logic)
             c = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(c)
 
@@ -313,6 +444,8 @@ def main():
                 mav_msg.encode()
             )
 
+            detection_count += 1
+            
             logger.info(
                 f"Detected crop at lat={crop_lat:.6f}, lon={crop_lon:.6f}, "
                 f"confidence={confidence:.2f}, area={area:.0f}px"
@@ -322,6 +455,9 @@ def main():
         logger.info("Shutdown requested")
     finally:
         # Cleanup
+        if not RUNNING_ON_PI:
+            cv2.destroyAllWindows()
+        
         if RUNNING_ON_PI:
             picam2.stop()
         elif cap is not None:

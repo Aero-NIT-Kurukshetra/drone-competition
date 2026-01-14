@@ -73,8 +73,8 @@ SPRAY_RELAY_PIN = 17           # GPIO pin for spray relay
 SPRAY_DURATION_S = 2.0         # Duration to activate spray
 
 # MAVLink connection
-DRONE_INTERFACE = "udp:localhost:13561"  # Or UDP link like "udp:localhost:14550"
 BAUD_RATE = 57600
+DRONE_INTERFACE = {"device": "udp:localhost:13561"} if not RUNNING_ON_PI else {"device": "/dev/ttyACM0", "baud": BAUD_RATE} # Or UDP link like "udp:localhost:14550"
 
 # Event IDs (matching GCS protocol)
 EVENT_SPRAY_COMMAND = 0        # Received from GCS
@@ -84,7 +84,7 @@ EVENT_SPRAYER_FINISHED = 1     # Sent to GCS
 # MAVLINK CONNECTION
 # ============================
 logger.info("Connecting to Pixhawk...")
-pixhawk = mavutil.mavlink_connection(DRONE_INTERFACE, baud=BAUD_RATE)
+pixhawk = mavutil.mavlink_connection(**DRONE_INTERFACE)
 logger.info("Waiting for heartbeat...")
 pixhawk.wait_heartbeat()
 logger.info(f"Connected to Pixhawk (system {pixhawk.target_system})")
@@ -99,6 +99,8 @@ latest_gps = {
     "alt": None,
     "ts": 0.0
 }
+
+
 
 def gps_reader():
     """Background thread to continuously read GPS updates."""
@@ -179,6 +181,7 @@ def capture_frame():
         return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
     elif cap is not None:
         ret, frame = cap.read()
+        frame = cv2.flip(frame, 1)
         return frame if ret else None
     else:
         # Return a dummy frame for testing
@@ -191,10 +194,86 @@ def yellow_mask(frame_bgr):
     upper = np.array([35, 255, 255])
     return cv2.inRange(hsv, lower, upper)
 
-def find_crop_center(frame):
+def draw_detection_overlay(frame, mask, contours, crop_center=None):
+    """
+    Draw detection visualization on frame for simulation mode.
+    Shows contours, area values, and crop center.
+    """
+    vis_frame = frame.copy() 
+    
+    # Draw all contours with their areas
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area >= AREA_THRESHOLD:
+            # Draw contour in green
+            cv2.drawContours(vis_frame, [contour], -1, (0, 255, 0), 2)
+            
+            # Get bounding box for area label placement
+            x, y, w, h = cv2.boundingRect(contour)
+            cv2.rectangle(vis_frame, (x, y), (x + w, y + h), (255, 0, 0), 1)
+            
+            # Draw area value
+            cv2.putText(
+                vis_frame,
+                f"Area: {int(area)}",
+                (x, y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                1
+            )
+    
+    # Draw center crosshair if crop detected
+    if crop_center is not None:
+        cx, cy = crop_center
+        cv2.circle(vis_frame, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.drawMarker(
+            vis_frame,
+            (cx, cy),
+            (0, 0, 255),
+            cv2.MARKER_CROSS,
+            20,
+            2
+        )
+        cv2.putText(
+            vis_frame,
+            f"Center: ({cx}, {cy})",
+            (cx + 15, cy - 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            1
+        )
+    
+    # Draw frame center
+    frame_cx = FRAME_W // 2
+    frame_cy = FRAME_H // 2
+    cv2.circle(vis_frame, (frame_cx, frame_cy), 3, (255, 255, 0), -1)
+    cv2.drawMarker(
+        vis_frame,
+        (frame_cx, frame_cy),
+        (255, 255, 0),
+        cv2.MARKER_CROSS,
+        15,
+        1
+    )
+    
+    # Draw centering tolerance circle
+    cv2.circle(
+        vis_frame,
+        (frame_cx, frame_cy),
+        CENTER_TOLERANCE_PX,
+        (255, 255, 0),
+        1
+    )
+    
+    return vis_frame
+
+def find_crop_center(frame, visualize=False):
     """
     Find the center of the largest yellow contour in the frame.
     Returns (cx, cy) in pixels, or None if no crop found.
+    If visualize=True, also returns the visualization frame and contours.
     """
     mask = yellow_mask(frame)
     contours, _ = cv2.findContours(
@@ -204,6 +283,9 @@ def find_crop_center(frame):
     )
 
     if not contours:
+        if visualize:
+            vis_frame = draw_detection_overlay(frame, mask, [], None)
+            return None, vis_frame
         return None
 
     # Find largest contour
@@ -211,11 +293,19 @@ def find_crop_center(frame):
     area = cv2.contourArea(c)
 
     if area < AREA_THRESHOLD:
+        if visualize:
+            vis_frame = draw_detection_overlay(frame, mask, contours, None)
+            return None, vis_frame
         return None
 
     x, y, w, h = cv2.boundingRect(c)
     cx = x + w // 2
     cy = y + h // 2
+    
+    if visualize:
+        vis_frame = draw_detection_overlay(frame, mask, contours, (cx, cy))
+        return (cx, cy), vis_frame
+    
     return (cx, cy)
 
 def pixel_to_ground_offset(cx, cy, altitude_m):
@@ -305,19 +395,49 @@ def execute_spray_procedure():
     logger.info("Step 1: Centering over crop...")
     centered = False
     
-    for attempt in range(MAX_CENTER_ATTEMPTS):
+    # Create window for visualization in simulation mode
+    if not RUNNING_ON_PI:
+        cv2.namedWindow("Sprayer Camera - Crop Detection", cv2.WINDOW_NORMAL)
+    
+    # for attempt in range(MAX_CENTER_ATTEMPTS):
+    attempt = 0
+    while True:
+        attempt += 1
         frame = capture_frame()
         if frame is None:
             logger.warning("Failed to capture frame")
             time.sleep(0.2)
             continue
         
-        crop_center = find_crop_center(frame)
+        # Get crop center with visualization if in simulation mode
+        if not RUNNING_ON_PI:
+            result = find_crop_center(frame, visualize=True)
+            if result[0] is None:
+                crop_center = None
+                vis_frame = result[1]
+            else:
+                crop_center, vis_frame = result
+            
+            # Display the visualization
+            cv2.putText(
+                vis_frame,
+                f"Attempt {attempt + 1}/{MAX_CENTER_ATTEMPTS}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
+            )
+            cv2.imshow("Sprayer Camera - Crop Detection", vis_frame)
+            cv2.waitKey(1)
+        else:
+            crop_center = find_crop_center(frame)
+        
         if crop_center is None:
             logger.warning(f"Attempt {attempt + 1}: Crop not visible")
             time.sleep(0.2)
             continue
-        
+
         cx, cy = crop_center
         
         # Check if centered
@@ -356,6 +476,10 @@ def execute_spray_procedure():
     if not centered:
         logger.warning("Could not center over crop after max attempts")
         # Continue anyway - spray at current position
+    
+    # Close visualization window in simulation mode
+    if not RUNNING_ON_PI:
+        cv2.destroyAllWindows()
     
     # Step 2: Descend to spray altitude
     logger.info(f"Step 2: Descending to {SPRAY_ALTITUDE_M}m...")
@@ -413,10 +537,11 @@ def main():
             # STATUSTEXT: Primary method - GCS sends "0,lat,lon,0"
             # COMMAND_LONG: Backup method - MAV_CMD_USER_1
             msg = pixhawk.recv_match(
-                type=["STATUSTEXT", "COMMAND_LONG"],
+                # type=["STATUSTEXT", "COMMAND_LONG"],
                 blocking=True,
                 timeout=1.0
             )
+            # print(msg, msg.get_type())
             
             if msg is None:
                 continue
