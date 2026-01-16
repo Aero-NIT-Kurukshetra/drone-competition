@@ -121,6 +121,29 @@ def clear_active_waypoint(drone_id: str):
     d["active_waypoint"] = None
     d["mode"] = "WAITING_FOR_NEXT_WAYPOINT"
     loop.create_task(sync_state_to_redis())
+@redis.listen("mission_manager:rtl")
+async def handle_rtl(data):
+    """
+    Handle RTL command from backend / UI
+    Supports single-drone or ALL-drones RTL
+    """
+    drone_id = data["drone_id"]
+
+    logger.warning(f"[MissionManager] RTL requested for {drone_id}")
+
+    if drone_id == "ALL":
+        # RTL BOTH drones
+        for d in DRONES:
+            set_mode(d, "RETURNING_TO_LAUNCH")
+            await mav.return_to_launch(d)
+    else:
+        # RTL single drone
+        set_mode(drone_id, "RETURNING_TO_LAUNCH")
+        await mav.return_to_launch(drone_id)
+
+    # Sync state once
+    await sync_state_to_redis()
+
 
 @redis.listen("start_mission")
 async def handle_start_mission(_):
@@ -137,7 +160,7 @@ async def handle_start_mission(_):
         resume_drone(drone_id)
 
     # Set guided mode for all drones
-    mav.set_guided_mode()
+    # mav.set_guided_mode()
     await asyncio.sleep(1)
 
     # Arm and takeoff scout
@@ -151,6 +174,28 @@ async def handle_start_mission(_):
         "mission_manager:request_next_waypoint",
         {"drone_id": "scout"}
     )
+@redis.listen("mission_manager:land")
+async def handle_land(data):
+    """
+    Handle LAND command from backend / UI
+    Supports single-drone or ALL-drones LAND
+    """
+    drone_id = data["drone_id"]
+
+    logger.warning(f"[MissionManager] LAND requested for {drone_id}")
+
+    if drone_id == "ALL":
+        for d in DRONES:
+            # Optional safety: only land if in air
+            if mission_state["drones"][d]["landed_state"] == 2:  # IN_AIR
+                set_mode(d, "LANDING")
+                await mav.land(d)
+    else:
+        if mission_state["drones"][drone_id]["landed_state"] == 2:
+            set_mode(drone_id, "LANDING")
+            await mav.land(drone_id)
+
+    await sync_state_to_redis()
 
 @redis.listen("path_planning:arm_takeoff")
 async def handle_arm_takeoff(data):
@@ -660,16 +705,13 @@ async def main():
 
     mav = MAVLinkManager(
         redis,
-        scout_uri=os.getenv("SCOUT_MAVLINK_UDP", "udp:localhost:13550"),
-        sprayer_uri=os.getenv("SPRAYER_MAVLINK_UDP", "udp:localhost:13560"),
+        mavlink_uri=os.getenv("MAVLINK_UDP", "udpin:localhost:14540"),
         loop=loop
     )
 
     tasks = [
         loop.create_task(heartbeat_loop()),
         loop.create_task(mav.poll()),
-        # loop.create_task(mav.poll(mav.scout, "scout")),
-        # loop.create_task(mav.poll(mav.sprayer, "sprayer")),
     ]
 
     await shutdown_event.wait()
